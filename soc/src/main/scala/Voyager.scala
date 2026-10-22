@@ -34,7 +34,10 @@ case class VoyagerParams(
   scaleDatatype:             String  = "",
   doubleBufferedAccumBuffer: Boolean = false,
   supportMVM:                Boolean = false,
-  supportSpmm:               Boolean = false)
+  supportSpmm:               Boolean = false,
+  // Lanes of the MVM unit; None is the array width, the accelerator's own
+  // default for every datatype but MXNF4 (which the Sphinx configs set to 128).
+  mvUnitWidth:               Option[Int] = None)
 
 case object VoyagerKey extends Field[Option[VoyagerParams]](None)
 
@@ -198,20 +201,22 @@ class MatrixVectorUnitIO(bitWidth: Int, oc: Int) extends Bundle {
   val matrix_vector_unit_done_rdy  = Input(Bool())
 }
 
-class MatrixVectorUnitMxIO(bitWidth: Int, scaleBitWidth: Int, oc: Int) extends Bundle {
+// scalePortWidth is the accelerator's MVU_SCALE_PORT_WIDTH: one block scale
+// per array-width group of the MVM unit's lanes.
+class MatrixVectorUnitMxIO(bitWidth: Int, scalePortWidth: Int, oc: Int) extends Bundle {
   val matrix_vector_unit_input_scale_req_rdy  = Input(Bool())
   val matrix_vector_unit_input_scale_req_vld  = Output(Bool())
   val matrix_vector_unit_input_scale_req_dat  = Output(UInt(96.W))
   val matrix_vector_unit_input_scale_resp_rdy = Output(Bool())
   val matrix_vector_unit_input_scale_resp_vld = Input(Bool())
-  val matrix_vector_unit_input_scale_resp_dat = Input(UInt((scaleBitWidth * 2).W))
+  val matrix_vector_unit_input_scale_resp_dat = Input(UInt(scalePortWidth.W))
 
   val matrix_vector_unit_weight_scale_req_rdy  = Input(Bool())
   val matrix_vector_unit_weight_scale_req_vld  = Output(Bool())
   val matrix_vector_unit_weight_scale_req_dat  = Output(UInt(96.W))
   val matrix_vector_unit_weight_scale_resp_rdy = Output(Bool())
   val matrix_vector_unit_weight_scale_resp_vld = Input(Bool())
-  val matrix_vector_unit_weight_scale_resp_dat = Input(UInt((scaleBitWidth * 2).W))
+  val matrix_vector_unit_weight_scale_resp_dat = Input(UInt(scalePortWidth.W))
 }
 
 class SpMMUnitIO(bitWidth: Int, scaleBitWidth: Int, oc: Int) extends Bundle {
@@ -267,14 +272,15 @@ class VoyagerIO(
   scaleBitWidth: Int,
   supportMX:     Boolean,
   supportMVM:    Boolean,
-  supportSpmm:   Boolean)
+  supportSpmm:   Boolean,
+  mvmScaleWidth: Int)
     extends Record {
 
   private val baseBundle = new BaseVoyagerIO(bitWidth, icDimension, ocDimension, scaleBitWidth)
   private val mxBundle   = if (supportMX) Some(new MatrixUnitMxIO(bitWidth, scaleBitWidth, ocDimension)) else None
   private val mvmBundle  = if (supportMVM) Some(new MatrixVectorUnitIO(bitWidth, ocDimension)) else None
   private val mmBundle   =
-    if (supportMX && supportMVM) Some(new MatrixVectorUnitMxIO(bitWidth, scaleBitWidth, ocDimension))
+    if (supportMX && supportMVM) Some(new MatrixVectorUnitMxIO(bitWidth, mvmScaleWidth, ocDimension))
     else None
   private val spmmBundle = if (supportSpmm) Some(new SpMMUnitIO(bitWidth, scaleBitWidth, ocDimension)) else None
 
@@ -301,7 +307,8 @@ class Accelerator(
   supportSpmm:               Boolean = false,
   bitWidth:                  Int,
   scaleBitWidth:             Int,
-  supportMX:                 Boolean)
+  supportMX:                 Boolean,
+  mvUnitWidth:               Int)
     extends BlackBox
     with HasBlackBoxPath {
 
@@ -314,6 +321,7 @@ class Accelerator(
       supportMX,
       supportMVM,
       supportSpmm,
+      scaleBitWidth * mvUnitWidth / ocDimension,
     )
   )
 
@@ -333,6 +341,7 @@ class Accelerator(
                    | DOUBLE_BUFFERED_ACCUM_BUFFER=$doubleBufferedAccumBuffer
                    | SUPPORT_MVM=$supportMVM
                    | SUPPORT_SPMM=$supportSpmm
+                   | MV_UNIT_WIDTH=$mvUnitWidth
                    |""".stripMargin.replace("\n", " ")
 
   require(makeStr.! == 0, "Failed to run RTL generation for Voyager")
@@ -360,6 +369,7 @@ class Accelerator(
                     |export DOUBLE_BUFFERED_ACCUM_BUFFER=${doubleBufferedAccumBuffer}
                     |export SUPPORT_MVM=${supportMVM}
                     |export SUPPORT_SPMM=${supportSpmm}
+                    |export MV_UNIT_WIDTH=${mvUnitWidth}
                     |""".stripMargin
   val file      = new java.io.File(shellPath);
   if (!file.getParentFile().exists()) {
@@ -400,6 +410,10 @@ class TLVoyager(
   }
   val supportMX          = config.datatype.startsWith("MX")
   val supportMVM         = config.supportMVM
+  // The MVM unit's lanes, and its scale ports' width: one block scale per
+  // array-width group of lanes (the accelerator's MVU_SCALE_PORT_WIDTH).
+  val mvUnitWidth        = config.mvUnitWidth.getOrElse(config.ocDimension)
+  val mvmScaleWidth      = scaleDatatypeWidth * mvUnitWidth / config.ocDimension
 
   val device       = new SimpleDevice("voyager", Seq("stanford,voyager"))
   val voyager_node = TLRegisterNode(
@@ -490,13 +504,13 @@ class TLVoyager(
 
   val mvm_unit_input_scale_interface     = makeRead(
     "Matrix Vector Unit Input Scale",
-    scaleDatatypeWidth * 2,
+    mvmScaleWidth,
     mvm_unit_input_scale_tl_node,
     supportMVM && supportMX,
   )
   val mvm_unit_weight_scale_interface    = makeRead(
     "Matrix Vector Unit Weight Scale",
-    scaleDatatypeWidth * 2,
+    mvmScaleWidth,
     mvm_unit_weight_scale_tl_node,
     supportMVM && supportMX,
   )
@@ -548,6 +562,7 @@ class TLVoyager(
           datatypeWidth,
           scaleDatatypeWidth,
           supportMX,
+          mvUnitWidth,
         )
       )
 
@@ -802,9 +817,9 @@ class TLVoyager(
 
         if (supportMX) {
           val (mvm_unit_input_scale_req_q, mvm_unit_input_scale_resp_q)   =
-            connectInput("matrix_vector_unit_input_scale", scaleDatatypeWidth * 2, mvm_unit_input_scale_interface)
+            connectInput("matrix_vector_unit_input_scale", mvmScaleWidth, mvm_unit_input_scale_interface)
           val (mvm_unit_weight_scale_req_q, mvm_unit_weight_scale_resp_q) =
-            connectInput("matrix_vector_unit_weight_scale", scaleDatatypeWidth * 2, mvm_unit_weight_scale_interface)
+            connectInput("matrix_vector_unit_weight_scale", mvmScaleWidth, mvm_unit_weight_scale_interface)
         }
 
         val mvm_wait_en_reg   = RegInit(false.B)
@@ -1079,7 +1094,8 @@ class WithVoyager(
   scaleDatatype:             String  = "",
   doubleBufferedAccumBuffer: Boolean = false,
   supportMVM:                Boolean = false,
-  supportSpmm:               Boolean = false)
+  supportSpmm:               Boolean = false,
+  mvUnitWidth:               Option[Int] = None)
     extends Config((site, here, up) => {
       case VoyagerKey => Some(
           VoyagerParams(
@@ -1095,6 +1111,7 @@ class WithVoyager(
             doubleBufferedAccumBuffer = doubleBufferedAccumBuffer,
             supportMVM                = supportMVM,
             supportSpmm               = supportSpmm,
+            mvUnitWidth               = mvUnitWidth,
           )
         )
     })

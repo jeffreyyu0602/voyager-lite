@@ -1,3 +1,10 @@
+# The MVM unit's lane count when the caller sets it (the SoC wrapper does,
+# through the Makefile's export); the datatype branches below only fill in
+# a default.
+if {[info exists ::env(MV_UNIT_WIDTH)]} {
+  set MV_UNIT_WIDTH $::env(MV_UNIT_WIDTH)
+}
+
 if { $DATATYPE == "P8_1" } {
   set INPUT_DATATYPE "DataTypes::posit8"
   set WEIGHT_DATATYPE "DataTypes::posit8"
@@ -162,7 +169,9 @@ if { $DATATYPE == "P8_1" } {
 
   set IC_PORT_WIDTH [expr {$IC_DIMENSION * 4}]
   set OC_PORT_WIDTH [expr {$OC_DIMENSION * 4}]
-  set MV_UNIT_WIDTH [expr {$OC_DIMENSION * 2}]
+  if {![info exists MV_UNIT_WIDTH]} {
+    set MV_UNIT_WIDTH [expr {$OC_DIMENSION * 2}]
+  }
   set SPMM_UNIT_WIDTH $OC_DIMENSION
 
   set VECTOR_UNIT_WIDTH $OC_DIMENSION
@@ -191,6 +200,10 @@ if {![info exists SUPPORT_DWC]} {
 
 if {![info exists VECTOR_UNIT_WIDTH]} {
   set VECTOR_UNIT_WIDTH $OC_DIMENSION
+}
+
+if {![info exists MV_UNIT_WIDTH]} {
+  set MV_UNIT_WIDTH $OC_DIMENSION
 }
 
 if {![info exists REDUCER_WIDTH]} {
