@@ -41,61 +41,43 @@ COMMON_FLAGS += --conv2d_im2col
 endif
 
 ################################################################################
-$(CODEGEN_DIR)/networks/resnet18/%/model.txt:
-	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py resnet18 $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) > $(dir $@)/codegen.log 2>&1
+# Networks
+#
+# One rule compiles any network. NETWORK names the output folder; these pick
+# what is compiled into it:
+#   MODE         test_codegen.py's model, e.g. llama_prefill (default: NETWORK)
+#   CHECKPOINT   --model_name_or_path (default: the compiler's own)
+#   QCONFIG      --qconfig (default: none)
+#   SPEC_LENGTH  draft tokens of a llama_verify step (default: 14)
+# For example:
+#   make network-proto NETWORK=llama2_7b_decode_kivi MODE=llama_decode_kivi \
+#     CHECKPOINT=meta-llama/Llama-2-7b-hf QCONFIG=mxnf4_int6
+################################################################################
+MODE ?= $(NETWORK)
+CHECKPOINT ?=
+QCONFIG ?=
+SPEC_LENGTH ?= 14
 
-$(CODEGEN_DIR)/networks/resnet50/%/model.txt:
-	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py resnet50 $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) > $(dir $@)/codegen.log 2>&1
+NETWORK_FLAGS := \
+	$(if $(filter llama_%,$(MODE)),$(LLM_FLAGS)) \
+	$(if $(CHECKPOINT),--model_name_or_path $(CHECKPOINT)) \
+	$(if $(QCONFIG),--qconfig $(QCONFIG)) \
+	$(if $(filter llama_verify,$(MODE)),--spec_length $(SPEC_LENGTH))
 
-$(CODEGEN_DIR)/networks/mobilebert/%/model.txt:
-	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py mobilebert $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) --model_name_or_path models/mobilebert/mobilebert-tiny-sst2-bf16 $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) > $(dir $@)/codegen.log 2>&1
+# A folder remembers what it was compiled as, so a NETWORK name reused with
+# other settings stops here instead of silently reusing the old compile.
+NETWORK_ARGS := $(strip $(MODE) $(NETWORK_FLAGS))
+NETWORK_RECORD := $(CODEGEN_DIR)/networks/$(NETWORK)/$(DATATYPE)/network_args.txt
+ifneq ($(wildcard $(NETWORK_RECORD)),)
+ifneq ($(strip $(shell cat $(NETWORK_RECORD))),$(NETWORK_ARGS))
+$(error $(NETWORK_RECORD) was compiled as "$(strip $(shell cat $(NETWORK_RECORD)))", not "$(NETWORK_ARGS)": use another NETWORK name or move that folder aside)
+endif
+endif
 
-$(CODEGEN_DIR)/networks/mobilebert_encoder/%/model.txt:
+$(CODEGEN_DIR)/networks/%/model.txt:
 	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py mobilebert $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) --model_name_or_path models/mobilebert/mobilebert-tiny-sst2-bf16 $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) --num_hidden_layers 1 > $(dir $@)/codegen.log 2>&1
-
-$(CODEGEN_DIR)/networks/bert/%/model.txt:
-	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py bert $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) &> $(dir $@)codegen.log
-
-$(CODEGEN_DIR)/networks/llama_prefill/%/model.txt:
-	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py llama_prefill $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) $(LLM_FLAGS) &> $(dir $@)codegen.log
-
-$(CODEGEN_DIR)/networks/llama_decode/%/model.txt:
-	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py llama_decode $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) $(LLM_FLAGS) &> $(dir $@)codegen.log
-
-$(CODEGEN_DIR)/networks/llama_decode_kivi/%/model.txt:
-	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py llama_decode_kivi $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) $(LLM_FLAGS) &> $(dir $@)codegen.log
-
-$(CODEGEN_DIR)/networks/llama_prefill_mp/%/model.txt:
-	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py llama_prefill $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) $(LLM_FLAGS) --qconfig mxnf4_attn_head_int6 &> $(dir $@)codegen.log
-
-$(CODEGEN_DIR)/networks/llama_prefill_spmm/%/model.txt:
-	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py llama_prefill $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) $(LLM_FLAGS) --qconfig mxnf4_outlier &> $(dir $@)codegen.log
-
-$(CODEGEN_DIR)/networks/llama_decode_mp/%/model.txt:
-	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py llama_decode $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) $(LLM_FLAGS) --qconfig mxnf4_attn_head_int6 &> $(dir $@)codegen.log
-
-$(CODEGEN_DIR)/networks/vit/%/model.txt:
-	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py vit $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) &> $(dir $@)codegen.log
-
-$(CODEGEN_DIR)/networks/segformer/%/model.txt:
-	mkdir -p $(dir $@)
-	python -u voyager-compiler/test/test_codegen.py segformer $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) &> $(dir $@)codegen.log
-
-$(CODEGEN_DIR)/networks/mobilenet_v2/%/model.txt:
-	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py mobilenet_v2 $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) &> $(dir $@)codegen.log
+	python voyager-compiler/test/test_codegen.py $(MODE) $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) $(NETWORK_FLAGS) > $(dir $@)codegen.log 2>&1
+	echo '$(NETWORK_ARGS)' > $(dir $@)network_args.txt
 
 ################################################################################
 # Gesture
