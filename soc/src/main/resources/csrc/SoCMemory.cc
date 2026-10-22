@@ -17,27 +17,35 @@ SoCMemory::SoCMemory(const std::vector<uint64_t>& sizes)
       macro_depth(get_env_int("MACRO_DEPTH", 1 << 30)),
       memory_suffix(get_env("MEMORY_SUFFIX", "ram")) {}
 
-vpiHandle SoCMemory::get_handle(const uint64_t address) {
+// The TLRAM serving `address`: "system.<bank>.<subbank>".
+std::string SoCMemory::bank_path(const uint64_t address) const {
   uint32_t bank_size = cache_size / num_banks;
   uint32_t subbank_size = bank_size / num_subbanks;
 
   int bank_index = address / bank_size;
   int subbank_index = (address % bank_size) / subbank_size;
-  int row_index = (address % subbank_size) / bank_width;
-  int macro_index = (address % bank_width) / macro_width;
-  int depth_index = row_index / macro_depth;
-  int macro_row = row_index % macro_depth;
 
   std::string bank_prefix =
       bank_index ? "bank_" + std::to_string(bank_index) : "bank";
   std::string subbank_prefix =
       subbank_index ? "ram_" + std::to_string(subbank_index) : "ram";
+  return "system." + bank_prefix + "." + subbank_prefix;
+}
+
+vpiHandle SoCMemory::get_handle(const uint64_t address) {
+  uint32_t bank_size = cache_size / num_banks;
+  uint32_t subbank_size = bank_size / num_subbanks;
+
+  int row_index = (address % subbank_size) / bank_width;
+  int macro_index = (address % bank_width) / macro_width;
+  int depth_index = row_index / macro_depth;
+  int macro_row = row_index % macro_depth;
+
   std::string macro_prefix =
       std::to_string(depth_index) + "_" + std::to_string(macro_index);
 
   std::string chiptop_path = "TestDriver.testHarness.chiptop0.";
-  std::string ram_path = "system." + bank_prefix + "." + subbank_prefix +
-                         ".mem.mem_ext.mem_" + macro_prefix;
+  std::string ram_path = bank_path(address) + ".mem.mem_ext.mem_" + macro_prefix;
 
 #ifndef GL_SIM
   std::string path_to_ram = chiptop_path + ram_path + "." + memory_suffix;
@@ -85,7 +93,53 @@ void SoCMemory::write_byte(uint64_t addr, uint8_t byte) {
   vpi_put_value(elem, &value, NULL, vpiNoDelay);
 }
 
+// The byte at `addr` if it still sits in its bank's write buffer. The TLRAM
+// parks each write in a one-entry buffer and moves it into the SRAM only on a
+// cycle without a read, forwarding it to any read of the same row
+// (sphinx/SRAM.scala); a backdoor read must do the same, or a bank read every
+// cycle after its last write reads that row stale.
+bool SoCMemory::read_write_buffer(uint64_t addr, uint8_t* byte) {
+#ifdef GL_SIM
+  return false;
+#else
+  uint32_t subbank_size = cache_size / num_banks / num_subbanks;
+  int row_index = (addr % subbank_size) / bank_width;
+  int lane = addr % bank_width;
+  std::string tlram = "TestDriver.testHarness.chiptop0." + bank_path(addr);
+
+  auto read_int = [](const std::string& path) {
+    vpiHandle handle = vpi_handle_by_name((PLI_BYTE8*)path.c_str(), NULL);
+    if (!handle) {
+      std::cerr << "Could not find write buffer signal: " << path << std::endl;
+      std::abort();
+    }
+    s_vpi_value value;
+    value.format = vpiIntVal;
+    vpi_get_value(handle, &value);
+    return value.value.integer;
+  };
+
+  if (!read_int(tlram + ".wb_valid")) return false;
+  if (read_int(tlram + ".wb_index") != row_index) return false;
+
+  // wb_sel is the buffered write's byte mask, one bit per lane.
+  std::string sel_path = tlram + ".wb_sel";
+  vpiHandle sel = vpi_handle_by_name((PLI_BYTE8*)sel_path.c_str(), NULL);
+  s_vpi_value mask;
+  mask.format = vpiVectorVal;
+  vpi_get_value(sel, &mask);
+  if (!((mask.value.vector[lane / 32].aval >> (lane % 32)) & 1)) return false;
+
+  *byte = static_cast<uint8_t>(
+      read_int(tlram + ".wb_coded_" + std::to_string(lane)) & 0xFF);
+  return true;
+#endif
+}
+
 uint8_t SoCMemory::read_byte(uint64_t addr) {
+  uint8_t buffered;
+  if (read_write_buffer(addr, &buffered)) return buffered;
+
   vpiHandle elem = get_handle(addr);
 
   int byte_offset = addr % macro_width;
