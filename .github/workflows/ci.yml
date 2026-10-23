@@ -66,10 +66,11 @@ jobs:
           path: clang_tidy_output_*.txt
           retention-days: 7
 
-  # A row runs ci/run.sh <config> <sims> <networks>: config names
+  # One row per hardware config: ci/run.sh <config> <sims> <networks> loads
   # ci/configs/<config>.env, and a network compiled with its own settings
-  # (ci/networks/<network>.env) gets a row of its own.
+  # has them in ci/networks/<network>.env.
   systemc_simulation:
+    name: systemc (${{ matrix.config }})
     needs: setup
     runs-on: self-hosted
     env:
@@ -79,17 +80,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { config: E4M3-16x16,       networks: resnet18 }
-          - { config: E4M3-16x16,       networks: mobilebert_encoder }
-          - { config: P8_1-16x16,       networks: resnet18 }
-          - { config: P8_1-16x16,       networks: mobilebert_encoder }
-          - { config: INT8-16x16,       networks: resnet18 }
-          - { config: INT8-16x16,       networks: mobilebert_encoder }
-          - { config: MXINT8-16x16-DWC, networks: "resnet18,mobilenet_v2" }
-          - { config: MXINT8-16x16-DWC, networks: mobilebert_encoder }
-          - { config: MXNF4-64x64,      networks: "llama_prefill,llama_decode,llama_decode_kivi,resnet18,resnet50,vit,bert" }
-          - { config: MXNF4-64x64,      networks: llama_prefill_mp }
-          - { config: MXNF4-64x64,      networks: llama_prefill_spmm }
+          - { config: E4M3-16x16,       networks: "resnet18,mobilebert_encoder" }
+          - { config: P8_1-16x16,       networks: "resnet18,mobilebert_encoder" }
+          - { config: INT8-16x16,       networks: "resnet18,mobilebert_encoder" }
+          - { config: MXINT8-16x16-DWC, networks: "resnet18,mobilenet_v2,mobilebert_encoder" }
+          - { config: MXNF4-64x64,      networks: "llama_prefill,llama_prefill_mp,llama_prefill_spmm,llama_decode,llama_decode_kivi,resnet18,resnet50,vit,bert" }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -101,6 +96,7 @@ jobs:
           ci/run.sh ${{ matrix.config }} fast-systemc "${{ matrix.networks }}"
 
   rtl_simulation:
+    name: rtl (${{ matrix.config }})
     needs: setup
     runs-on: self-hosted
     env:
@@ -112,19 +108,12 @@ jobs:
       matrix:
         include:
           - { config: E4M3-32x64,   networks: "resnet18,resnet50" }
-          - { config: E4M3-16x16,   networks: resnet18 }
-          - { config: E4M3-16x16,   networks: mobilebert_encoder }
-          - { config: E4M3-4x8,     networks: resnet18 }
-          - { config: E4M3-4x8,     networks: mobilebert_encoder }
-          - { config: P8_1-16x16,   networks: resnet18 }
-          - { config: P8_1-16x16,   networks: mobilebert_encoder }
-          - { config: INT8-16x16,   networks: resnet18 }
-          - { config: INT8-16x16,   networks: mobilebert_encoder }
-          - { config: MXINT8-16x16, networks: resnet18 }
-          - { config: MXINT8-16x16, networks: mobilebert_encoder }
-          - { config: MXNF4-64x64,  networks: "llama_prefill,llama_decode,llama_decode_kivi,resnet18,resnet50,vit,bert" }
-          - { config: MXNF4-64x64,  networks: llama_prefill_mp }
-          - { config: MXNF4-64x64,  networks: llama_prefill_spmm }
+          - { config: E4M3-16x16,   networks: "resnet18,mobilebert_encoder" }
+          - { config: E4M3-4x8,     networks: "resnet18,mobilebert_encoder" }
+          - { config: P8_1-16x16,   networks: "resnet18,mobilebert_encoder" }
+          - { config: INT8-16x16,   networks: "resnet18,mobilebert_encoder" }
+          - { config: MXINT8-16x16, networks: "resnet18,mobilebert_encoder" }
+          - { config: MXNF4-64x64,  networks: "llama_prefill,llama_prefill_mp,llama_prefill_spmm,llama_decode,llama_decode_kivi,resnet18,resnet50,vit,bert" }
     steps:
       - uses: actions/checkout@v4
         with:
