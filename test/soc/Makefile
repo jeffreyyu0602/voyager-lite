@@ -5,7 +5,10 @@
 ACCEL_DIR = ../..
 
 # Build parameters (filled in from environment or defaults)
-BUILD_DIR ?= $(ACCEL_DIR)/build/$(DATATYPE)_$(IC_DIMENSION)x$(OC_DIMENSION)_$(INPUT_BUFFER_SIZE)x$(WEIGHT_BUFFER_SIZE)x$(ACCUM_BUFFER_SIZE)_$(DOUBLE_BUFFERED_ACCUM_BUFFER)_$(SUPPORT_MVM)_$(SUPPORT_SPMM)
+ARRAY    = $(IC_DIMENSION)x$(OC_DIMENSION)
+BUFFERS  = $(INPUT_BUFFER_SIZE)x$(WEIGHT_BUFFER_SIZE)x$(ACCUM_BUFFER_SIZE)
+FEATURES = $(DOUBLE_BUFFERED_ACCUM_BUFFER)_$(SUPPORT_MVM)_$(SUPPORT_SPMM)
+BUILD_DIR ?= $(ACCEL_DIR)/build/$(DATATYPE)_$(ARRAY)_$(BUFFERS)_$(FEATURES)
 CC_BUILD_DIR = $(BUILD_DIR)/cc
 
 export CODEGEN_DIR ?= test/compiler
@@ -88,7 +91,9 @@ toolchain:
 $(CC_BUILD_DIR)/spdlog.o:
 	$(MAKE) -C $(ACCEL_DIR) spdlog
 
-$(CC_BUILD_DIR)/GenerateSoCBinaries.o: $(ACCEL_DIR)/test/soc/GenerateSoCBinaries.cc network-proto
+$(CC_BUILD_DIR)/GenerateSoCBinaries.o: \
+	$(ACCEL_DIR)/test/soc/GenerateSoCBinaries.cc \
+	$(ACCEL_DIR)/test/compiler/proto/voyager_ir.pb.cc
 	@mkdir -p $(CC_BUILD_DIR)
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
@@ -125,11 +130,11 @@ GENERATE_SOC_BINARIES_OBJS := \
 	$(JTAG_OBJS) \
 	$(COMMON_OBJS)
 
-$(CC_BUILD_DIR)/GenerateSoCBinaries: toolchain $(GENERATE_SOC_BINARIES_OBJS)
+$(CC_BUILD_DIR)/GenerateSoCBinaries: $(GENERATE_SOC_BINARIES_OBJS)
 	$(CC) -o $@ $(GENERATE_SOC_BINARIES_OBJS) $(LDLIBS) $(LDFLAGS)
 
-GenerateSoCBinaries: $(CC_BUILD_DIR)/GenerateSoCBinaries
-	$<
+GenerateSoCBinaries: network-proto toolchain $(CC_BUILD_DIR)/GenerateSoCBinaries
+	$(CC_BUILD_DIR)/GenerateSoCBinaries
 
 JTAG_CHECKER_OBJS := \
 	$(CC_BUILD_DIR)/JtagSimChecker.o \

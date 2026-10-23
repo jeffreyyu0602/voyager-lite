@@ -69,9 +69,29 @@ ACCURACY_RESULTS = {
 }
 
 
-def run_gold_model_unit_test(model, layer, output_folder):
+def network_env(network):
+    """Returns os.environ plus NETWORK and the network's compile settings.
+
+    A network compiled with its own settings keeps them in
+    ci/networks/<network>.env, one KEY=VALUE per line (MODE, CHECKPOINT,
+    QCONFIG, EXTRA_COMPILER_FLAGS). Every make call for the network needs
+    them, because codegen.mk checks them against the compiled folder.
+    """
     env_vars = os.environ.copy()
-    env_vars["NETWORK"] = model
+    env_vars["NETWORK"] = network
+    settings_file = f"ci/networks/{network}.env"
+    if os.path.exists(settings_file):
+        with open(settings_file) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    key, value = line.split("=", 1)
+                    env_vars[key] = value
+    return env_vars
+
+
+def run_gold_model_unit_test(model, layer, output_folder):
+    env_vars = network_env(model)
     env_vars["TESTS"] = layer
     env_vars["CLOCK_PERIOD"] = "1"
     env_vars["SIMS"] = "gold,pytorch"
@@ -133,8 +153,7 @@ def run_gold_model_tests(layers, num_processes, results_folder):
 
 
 def run_systemc_unit_test(model, layer, output_folder, fast):
-    env_vars = os.environ.copy()
-    env_vars["NETWORK"] = model
+    env_vars = network_env(model)
     env_vars["TESTS"] = layer
     env_vars["CLOCK_PERIOD"] = "1"
     env_vars["SIMS"] = "gold,accelerator"
@@ -201,8 +220,7 @@ def run_systemc_tests(layers, num_processes, results_folder, fast):
 
 
 def run_rtl_test(model, layer, layer_count, num_tiles, output_folder, debug):
-    env_vars = os.environ.copy()
-    env_vars["NETWORK"] = model
+    env_vars = network_env(model)
     env_vars["TESTS"] = layer
     env_vars["SIMS"] = "gold,accelerator"
 
@@ -299,8 +317,7 @@ def run_rtl_tests(
 
     print(f"Building VCS simulation binary using {model} {test}")
 
-    env_vars = os.environ.copy()
-    env_vars["NETWORK"] = model
+    env_vars = network_env(model)
     env_vars["TESTS"] = test
     env_vars["SIMS"] = "gold,accelerator"
     env_vars["LD_PRELOAD"] = env_vars["CONDA_PREFIX"] + "/lib/libstdc++.so.6"
@@ -376,8 +393,7 @@ def run_accuracy(model, dataset, num_processes, output_folder):
         print(f"Only testing accuracy for the first model: {model[0]}")
     model = model[0]
 
-    env_vars = os.environ.copy()
-    env_vars["NETWORK"] = model
+    env_vars = network_env(model)
     set_default_env_vars(env_vars)
     build_folder = get_build_folder(env_vars)
 
@@ -695,8 +711,7 @@ def main():
         tile_counts[args.models[0]] = {test: 1 for test in layers[args.models[0]]}
     elif args.sims != "accuracy":
         for network in args.models:
-            env_vars = os.environ.copy()
-            env_vars["NETWORK"] = network
+            env_vars = network_env(network)
             subprocess.run(["make", "network-proto"], env=env_vars)
             datatype = os.environ["DATATYPE"]
             block_size = max(

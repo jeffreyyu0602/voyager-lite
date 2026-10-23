@@ -52,7 +52,9 @@ class SoCMemory : public ArrayMemory {
   // Byte intervals of the SRAM partition the testbench wrote (unmerged).
   std::vector<std::pair<uint64_t, uint64_t>> shadow_ranges_;
 
+  std::string bank_path(const uint64_t address) const;
   vpiHandle get_handle(const uint64_t address);
+  bool read_write_buffer(uint64_t addr, uint8_t* byte);
   uint8_t read_byte(uint64_t addr);
   void write_byte(uint64_t addr, uint8_t byte);
 

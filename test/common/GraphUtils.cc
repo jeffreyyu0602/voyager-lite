@@ -714,7 +714,14 @@ void run_async_copy(const voyager::PrimOp& prim, const ScalarEnv& env,
 void zero_buffer(const Tensor& tensor, uint32_t banks, uint64_t bank_stride,
                  MemoryInterface* memory) {
   const uint64_t span = banks > 1 ? banks * bank_stride : get_num_bytes(tensor);
-  std::vector<char> zeros(span, 0);
-  memory->write_bytes_to_memory(tensor.address, tensor.partition, span,
-                                zeros.data());
+  // Bound both temporary storage and the memory interface's int byte count.
+  constexpr uint64_t chunk_limit = 1 << 20;
+  std::vector<char> zeros(std::min(span, chunk_limit), 0);
+  for (uint64_t offset = 0; offset < span;) {
+    const int count = static_cast<int>(
+        std::min<uint64_t>(span - offset, zeros.size()));
+    memory->write_bytes_to_memory(tensor.address + offset, tensor.partition,
+                                  count, zeros.data());
+    offset += count;
+  }
 }

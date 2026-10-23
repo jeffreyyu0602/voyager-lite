@@ -2,9 +2,11 @@
 
 #include <ac_int.h>
 
+#include <algorithm>
 #include <any>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -30,7 +32,7 @@ class MemoryInterface {
 
     const uint64_t address = get_address(tensor);
     const int partition = get_partition(tensor);
-    const int size = get_size(tensor);
+    const int64_t size = get_size(tensor);
 
     // A pitched window gathers rows of `run` valid elements sitting `pitch`
     // elements apart; a contiguous tensor is the pitch == run case.
@@ -40,11 +42,19 @@ class MemoryInterface {
 
     const int64_t num_bytes = (span * T::width + 7) / 8;
     char* buffer = new char[num_bytes];
-    read_bytes_from_memory(address, partition, num_bytes, buffer);
+    // The memory interface accepts an int byte count. Split large tensors
+    // into valid transfers without narrowing their element or byte counts.
+    for (int64_t offset = 0; offset < num_bytes;) {
+      const int chunk = static_cast<int>(std::min<int64_t>(
+          num_bytes - offset, std::numeric_limits<int>::max()));
+      read_bytes_from_memory(address + offset, partition, chunk,
+                             buffer + offset);
+      offset += chunk;
+    }
 
     std::shared_ptr<T[]> results(new T[size]);
 
-    for (int i = 0; i < size; i++) {
+    for (int64_t i = 0; i < size; i++) {
       const int64_t u = (i / run) * pitch + i % run;
       // Data may be unaligned and span multiple bytes. We calculate the start
       // and end byte indices and the offset within the first byte. We then read
@@ -213,19 +223,17 @@ class MemoryInterface {
   }
 
   template <typename T>
-  bool read_value_with_type(const int partition, const int address,
+  bool read_value_with_type(const int partition, const uint64_t address,
                             const int index, std::string dtype, float& value) {
     if (dtype != DataTypes::TypeName<T>::name()) {
       return false;
     }
 
-    int start = index * T::width / 8;
-    int end = (index + 1) * T::width / 8;
-    int offset = (index * T::width) % 8;
-    int num_bytes = (end - start + 1) * 8;
-
-    int bits_remaining = num_bytes * 8 - T::width - offset;
-    num_bytes = num_bytes - bits_remaining / 8;
+    // Keep tensor offsets wide; each scalar transfer remains small.
+    const uint64_t bit_index = static_cast<uint64_t>(index) * T::width;
+    const uint64_t start = bit_index / 8;
+    const int offset = bit_index % 8;
+    const int num_bytes = (offset + T::width + 7) / 8;
 
     char buffer[num_bytes];
     read_bytes_from_memory(address + start, partition, num_bytes, buffer);
@@ -245,7 +253,7 @@ class MemoryInterface {
   }
 
   template <typename... Ts>
-  void read_value_helper(const int partition, const int address,
+  void read_value_helper(const int partition, const uint64_t address,
                          const int index, std::string dtype, float& value) {
     bool matched =
         (read_value_with_type<Ts>(partition, address, index, dtype, value) ||
@@ -256,7 +264,7 @@ class MemoryInterface {
     }
   }
 
-  float read_value(const int partition, const int address, const int index,
+  float read_value(const int partition, const uint64_t address, const int index,
                    std::string dtype) {
     float value;
     read_value_helper<SUPPORTED_TYPES>(partition, address, index, dtype, value);
@@ -264,19 +272,17 @@ class MemoryInterface {
   }
 
   template <typename T>
-  bool write_value_with_type(const int partition, const int address,
+  bool write_value_with_type(const int partition, const uint64_t address,
                              const int index, std::string dtype, T value) {
     if (dtype != DataTypes::TypeName<T>::name()) {
       return false;
     }
 
-    int start = index * T::width / 8;
-    int end = (index + 1) * T::width / 8;
-    int num_bytes = (end - start + 1) * 8;
-    int offset = (index * T::width) % 8;
-
-    int bits_remaining = num_bytes * 8 - T::width - offset;
-    num_bytes = num_bytes - bits_remaining / 8;
+    // Keep tensor offsets wide; each scalar transfer remains small.
+    const uint64_t bit_index = static_cast<uint64_t>(index) * T::width;
+    const uint64_t start = bit_index / 8;
+    const int offset = bit_index % 8;
+    const int num_bytes = (offset + T::width + 7) / 8;
 
     constexpr int buf_width = (T::width / 8 + 2) * 8;
     ac_int<buf_width, false> bits = ((ac_int<buf_width, false>)value.bits_rep())
@@ -302,7 +308,7 @@ class MemoryInterface {
   }
 
   template <typename... Ts>
-  void write_value_helper(const int partition, const int address,
+  void write_value_helper(const int partition, const uint64_t address,
                           const int index, std::string dtype, float value) {
     bool matched =
         (write_value_with_type<Ts>(partition, address, index, dtype, value) ||
@@ -313,7 +319,7 @@ class MemoryInterface {
     }
   }
 
-  void write_value(const int partition, const int address, const int index,
+  void write_value(const int partition, const uint64_t address, const int index,
                    std::string dtype, float value) {
     write_value_helper<SUPPORTED_TYPES>(partition, address, index, dtype,
                                         value);

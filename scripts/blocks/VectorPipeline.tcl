@@ -19,3 +19,22 @@ proc pre_assembly {} {
     directive set /$full_block_name_stripped/$outlier_filter_name_stripped -MAP_TO_MODULE {[Block] OutlierFilter.v1}
   }
 }
+
+proc pre_architect {} {
+  global full_block_name VECTOR_UNIT_WIDTH
+  if {$VECTOR_UNIT_WIDTH < 256} {
+    return
+  }
+
+  # Four wide vectors otherwise become a single-port SRAM. These temporary
+  # packs need parallel access to sustain the existing pipeline schedule.
+  set pipeline [string map {" " ""} $full_block_name]
+  set prefix "/${pipeline}/${pipeline}"
+  set packed_vectors "Pack1D<${pipeline}::VectorPack,4UL>"
+  directive set \
+    "${prefix}:router/router/${packed_vectors}::create:p.value.value.float_val.d:rsc" \
+    -MAP_TO_MODULE {[Register]}
+  directive set \
+    "${prefix}:run_stage_0/run_stage_0/while:for:payloads.value.value.float_val.d:rsc" \
+    -MAP_TO_MODULE {[Register]}
+}

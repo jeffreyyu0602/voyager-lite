@@ -67,7 +67,9 @@ std::vector<SerializedParam> serialize_params(
     if (auto* mp = dynamic_cast<MatrixParams*>(base)) {
       sp.kind = kMatrixParams;
       sp.is_fc = mp->is_fc;
+#if SUPPORT_SPMM
       sp.is_spmm = mp->is_spmm;
+#endif
       sp.bytes = serialize_one(*mp);
     } else if (auto* vp = dynamic_cast<VectorParams*>(base)) {
       sp.kind = kVectorParams;

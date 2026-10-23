@@ -70,6 +70,14 @@ ifdef CLOCK_PERIOD
 	override BASE_FLAGS += -DCLOCK_PERIOD=$(CLOCK_PERIOD)
 endif
 
+# The MVM unit's lane count, when the caller sets it (the SoC wrapper does);
+# otherwise ArchitectureParams.h and scripts/architecture.tcl pick the
+# datatype's default.  Exported so the Catapult runs see the same value.
+ifdef MV_UNIT_WIDTH
+	override BASE_FLAGS += -DMV_UNIT_WIDTH=$(MV_UNIT_WIDTH)
+	export MV_UNIT_WIDTH
+endif
+
 ifeq ($(DEBUG), 1)
 	override BASE_FLAGS += -DDEBUG -g -O0 -ggdb
 else

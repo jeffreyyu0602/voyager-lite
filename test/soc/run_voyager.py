@@ -500,6 +500,15 @@ def main():
             "Requires --jtag-mode. Output appears in the OpenOCD log."
         ),
     )
+    parser.add_argument(
+        "--build-only",
+        action="store_true",
+        help=(
+            "Stop once the firmware is linked: compile the networks that have "
+            "no model.txt, emit and link every layer, run nothing. No Verilog "
+            "is generated and no simulator is built."
+        ),
+    )
     args = parser.parse_args()
     args.models = [s.strip() for s in args.models.split(",")]
 
@@ -557,7 +566,7 @@ def main():
     if args.jtag_mode is not None and args.semihosting:
         env_vars["SEMIHOSTING"] = "1"
 
-    if args.results_folder is None:
+    if args.results_folder is None and not args.build_only:
         # Generate SoC verilog
         print("Generating verilog...")
         with open(f"{results_folder}/verilog_generation.log", "w") as log_file:
@@ -798,6 +807,11 @@ def main():
                     stderr=subprocess.STDOUT,
                     check=True,
                 )
+
+    if args.build_only:
+        total = sum(len(v) for v in layers.values())
+        print(f"--build-only: {total} layer(s) linked under tests/voyager/networks/, nothing run.")
+        exit(0)
 
     success = run_rtl_simulations(
         layers,
