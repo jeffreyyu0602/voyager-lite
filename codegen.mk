@@ -80,15 +80,8 @@ $(CODEGEN_DIR)/networks/%/model.txt:
 	echo '$(NETWORK_ARGS)' > $(dir $@)network_args.txt
 
 ################################################################################
-# Gesture
-################################################################################
-$(CODEGEN_DIR)/networks/gesture/CFLOAT/model.txt:
-	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py gesture --model_name_or_path models/gesture/model.pth --model_output_dir $(dir $@) > $(dir $@)/codegen.log 2>&1
-
-################################################################################
 # Layer Tests
 ################################################################################
-test/compiler/networks/layertest/CFLOAT/model.txt:
+build/codegen/networks/layertest/CFLOAT/model.txt:
 	mkdir -p $(dir $@)
 	python voyager-compiler/test/test_codegen.py layertest --model_output_dir $(dir $@) > $(dir $@)/codegen.log 2>&1

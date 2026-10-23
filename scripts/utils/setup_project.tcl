@@ -50,18 +50,18 @@ go new
 solution file add $ROOT/src/Accelerator.h -type CHEADER
 
 # Add testbench files
-solution file add $ROOT/test/common/TestRunner.cc -type C++ -exclude true
-solution file add $ROOT/test/common/Harness.cc -type C++ -exclude true
-solution file add $ROOT/test/common/GoldModel.cc -type C++ -exclude true
-solution file add $ROOT/test/common/Simulation.cc -type C++ -exclude true
-solution file add $ROOT/test/common/Checker.cc -type C++ -exclude true
-solution file add $ROOT/test/common/ArrayMemory.cc -type C++ -exclude true
-solution file add $ROOT/test/common/AccessCounter.cc -type C++ -exclude true
-solution file add $ROOT/test/toolchain/MapOperation.cc -type C++ -exclude true
+solution file add $ROOT/test/testbench/TestRunner.cc -type C++ -exclude true
+solution file add $ROOT/test/testbench/Harness.cc -type C++ -exclude true
+solution file add $ROOT/test/gold/GoldModel.cc -type C++ -exclude true
+solution file add $ROOT/test/network/Simulation.cc -type C++ -exclude true
+solution file add $ROOT/test/checker/Checker.cc -type C++ -exclude true
+solution file add $ROOT/test/network/ArrayMemory.cc -type C++ -exclude true
+solution file add $ROOT/test/testbench/AccessCounter.cc -type C++ -exclude true
+solution file add $ROOT/toolchain/MapOperation.cc -type C++ -exclude true
 
 # Add the bufferized IR runtime
-solution file add $ROOT/test/common/Model.cc -type C++ -exclude true
-solution file add $ROOT/test/common/Interpreter.cc -type C++ -exclude true
-solution file add $ROOT/test/common/GraphUtils.cc -type C++ -exclude true
-solution file add $ROOT/test/common/Tiling.cc -type C++ -exclude true
-solution file add $ROOT/test/compiler/proto/voyager_ir.pb.cc -type C++ -exclude true
+solution file add $ROOT/test/network/Model.cc -type C++ -exclude true
+solution file add $ROOT/test/network/Interpreter.cc -type C++ -exclude true
+solution file add $ROOT/test/network/GraphUtils.cc -type C++ -exclude true
+solution file add $ROOT/test/network/Tiling.cc -type C++ -exclude true
+solution file add $ROOT/build/codegen/proto/voyager_ir.pb.cc -type C++ -exclude true

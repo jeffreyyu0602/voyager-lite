@@ -3,7 +3,7 @@
 Two drivers import this module and stay separate on purpose:
   - run_regression.py (repo root): the standalone accelerator flows
     (gold model, SystemC, Catapult scverify RTL, accuracy).
-  - test/soc/run_voyager.py: the SoC RTL flow (Chipyard simv, firmware on the
+  - soc/run_voyager.py: the SoC RTL flow (Chipyard simv, firmware on the
     Rocket core, DMA replay testbench).
 
 Only genuinely flow-independent pieces live here: build-folder naming, the
@@ -176,7 +176,7 @@ def run_with_timeout(cmd, env, stdout_file, timeout, cwd=None):
 
 
 def add_layers(network, layers, layer_counts, tile_counts, uniquify,
-               skip_layers=None, codegen_root="test/compiler", datatype=None):
+               skip_layers=None, codegen_root="build/codegen", datatype=None):
     """Populate the test list from the compiler's layers.txt.
 
     One line per bufferized layer: display name, first and last emitted op of

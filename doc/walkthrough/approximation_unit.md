@@ -12,20 +12,20 @@
     * In `ApproximationConstants.h`:
       * Add the ranges and coefficients in the correct format.
       * If the function takes in extra parameters at runtime (e.g. leaky_relu), add the function opcode to `unary_ops_with_kwargs` in `ApproximationConstants.h`.
-    * In `test/common/operations/VectorOps.h`:
+    * In `test/gold/VectorOps.h`:
       * Add the function opcode to `unary_ops`.
       * Add `else if` case as done for the other activation functions to call `poly_approx()` with appropriate ranges and constants in `ApproximationConstants.h`.
       * If the function takes in extra parameters at runtime (e.g. leaky_relu), some math and coefficient loading will be done within this `else if` block.
 
 3. **HLS Integration:**
-    * In `test/toolchain/Common.h`: 
+    * In `toolchain/Common.h`: 
       * Add the new function's opcode to the second stage in `vector_unit_stages`.
       * Map the new function's opcode to `VectorInstructions::vpoly`.
       * Note: see unit test support to determine the function's opcode if you are unsure. 
-    * In `test/toolchain/VectorOps.h`:
+    * In `toolchain/VectorOps.h`:
       * Add `else if` case as done for the other activation functions to feed appropriate ranges and constants from `ApproximationConstants.h` into `vector_instruction_config`.
       * If the function takes in extra parameters at runtime (e.g. leaky_relu), some math and coefficient loading will be done within this `else if` block.
-    * In `test/toolchain/MatrixOps.h`:
+    * In `toolchain/MatrixOps.h`:
       * Add `else if` case as done for the other activation functions to feed appropriate ranges and constants from `ApproximationConstants.h` into `vector_instruction_config` for fused operations.
       * If the function takes in extra parameters at runtime (e.g. leaky_relu), some math and coefficient loading will be done within this `else if` block.
 
@@ -35,12 +35,12 @@
       * We expect differences in output because (1) we are approximating and (2) datatype differences (the Vector Unit's 16-bit BFloat16 versus Pytorch's 32-bit type).
     * Gold vs. Fast-SystemC (e.g. calling gelu, silu, and tanhshrink): `DATATYPE=MXINT8 IC_DIMENSION=32 OC_DIMENSION=32 python run_regression.py --models polyapprox --tests gelu,silu,tanh_1 --sims fast-systemc --num_processes 16`
       * We expect no difference in outputs. 
-    * Opcode: Running the Gold vs. PyTorch test also serves as a way to verify the new function's opcode. After running, check `test/compiler/networks/polyapprox/model.txt` and the opcode should be in here. 
+    * Opcode: Running the Gold vs. PyTorch test also serves as a way to verify the new function's opcode. After running, check `build/codegen/networks/polyapprox/model.txt` and the opcode should be in here. 
 
 --- 
 ## Approximation Unit Code Overview
 
-### `test/toolchain/ApproximationConstants.h`
+### `toolchain/ApproximationConstants.h`
 
 * Defines constants for each non-linear function that is approximated using the Approximation Unit.
 * For each function:
@@ -49,7 +49,7 @@
   * `clamp_min` and `clamp_max` ac_ints
 * `NUM_MAXES` = 6, `NUM_RANGES` = 7, and `NUM_COEFFS` = 4 is specified in `ArchitectureParams.h`, which is widely included on both software and hardware sides for simplicity. These are hard-coded and should not be changed because the Approximation Unit relies on them with its quadratic approximation.
 
-### `src/ApproximationUnit.h`
+### `src/vector_unit/ApproximationUnit.h`
 
 * Implements a piecewise polynomial approximation unit.
 * Supports `NUM_RANGES` ranges, each with a polynomial of degree 3 (because `NUM_COEFFS` = 4).
@@ -60,18 +60,18 @@
 * `VectorInstructionConfig` struct extended in with `ApproxUnitConfig` that holds:
   * `maxes`, `ranges`, `clamp_min`, `clamp_max`
 
-### `src/VectorPipelines.h`
-* For each of 8 instructions in `VectorInstructionConfig` sends the `ApproxUnitConfig` in the instruction config to `VectorPipelineMain.h`
+### `src/vector_unit/VectorUnit.h`
+* For each of 8 instructions in `VectorInstructionConfig` sends the `ApproxUnitConfig` in the instruction config to `VectorPipeline.h`
 
-### `src/VectorPipelineMain.h`
+### `src/vector_unit/VectorPipeline.h`
 * Pops `approx_unit_config` only for the first instruction (matching push frequency).
 * And calls `vpoly()` in `VectorOps.h` with the fields of `approx_unit_config`.
 
-### `src/VectorOps.h`
+### `src/vector_unit/VectorOps.h`
 * Function `vpoly()` handles all approximated functions and forwards inputs to `vepoly()` in `ApproximationUnit.h`.
 
 ### Gold Simulation
-* The Gold model of `vepoly` is called `poly_approx` and lives in `test/common/operations/VectorOps.h`.
-* Because `VectorInstructionConfig` is not used in Gold, coefficients are passed from `ApproximationConstants.h` to `poly_approx` directly in `test/common/operations/Softmax.h` and `test/common/operations/VectorOps.h`.
+* The Gold model of `vepoly` is called `poly_approx` and lives in `test/gold/VectorOps.h`.
+* Because `VectorInstructionConfig` is not used in Gold, coefficients are passed from `ApproximationConstants.h` to `poly_approx` directly in `test/gold/Softmax.h` and `test/gold/VectorOps.h`.
 
 

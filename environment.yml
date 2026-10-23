@@ -14,4 +14,4 @@ dependencies:
       - compiledb
       - -e voyager-compiler
 variables:
-  CODEGEN_DIR: test/compiler
+  CODEGEN_DIR: build/codegen

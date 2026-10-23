@@ -18,4 +18,4 @@ source $(conda info --base)/etc/profile.d/conda.sh
 conda activate ${CI_ENV_ROOT:?}/ci-env-${GITHUB_RUN_ID:?}
 
 export PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-export CODEGEN_DIR=test/compiler
+export CODEGEN_DIR=build/codegen
