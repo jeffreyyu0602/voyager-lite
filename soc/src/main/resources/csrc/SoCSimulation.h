@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "SoCMemory.h"
-#include "test/network/Simulation.h"
+#include "test/Simulation.h"
 #include "soc/emitter/HostRequests.h"
 #include "soc/firmware/common/host_request.h"
 

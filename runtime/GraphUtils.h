@@ -7,8 +7,8 @@
 #include <variant>
 #include <vector>
 
-#include "test/network/MemoryInterface.h"
-#include "test/network/Tensor.h"
+#include "runtime/MemoryInterface.h"
+#include "runtime/Tensor.h"
 #include "build/codegen/proto/voyager_ir.pb.h"
 
 // Reading the compiler's graph. Every function here takes a piece of the

@@ -3,8 +3,8 @@
 #include <vector>
 
 #include "spdlog/spdlog.h"
-#include "test/network/MemoryInterface.h"
-#include "test/network/Utils.h"
+#include "runtime/MemoryInterface.h"
+#include "runtime/Utils.h"
 #include "test/gold/LayerNorm.h"
 #include "test/gold/MatrixOps.h"
 #include "test/gold/Microscaling.h"

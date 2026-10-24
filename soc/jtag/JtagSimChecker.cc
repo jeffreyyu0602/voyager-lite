@@ -8,8 +8,8 @@
 #include <iostream>
 #include <vector>
 
-#include "test/network/GraphUtils.h"
-#include "test/network/Utils.h"
+#include "runtime/GraphUtils.h"
+#include "runtime/Utils.h"
 #include "soc/jtag/JtagPreload.h"
 
 JtagSimChecker::JtagSimChecker(const std::string& dump_path)

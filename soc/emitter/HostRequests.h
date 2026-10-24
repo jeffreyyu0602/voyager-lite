@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "test/network/Model.h"
+#include "runtime/Model.h"
 #include "build/codegen/proto/voyager_ir.pb.h"
 
 // The host-request table: the prims of a layer's program that the firmware

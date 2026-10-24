@@ -1,6 +1,6 @@
 #pragma once
 
-#include "test/network/Tiling.h"
+#include "toolchain/Tiling.h"
 #include "toolchain/Common.h"
 
 void map_pool2d(const voyager::Operation& operation, const ScalarEnv& env,

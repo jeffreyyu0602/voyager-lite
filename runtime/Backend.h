@@ -6,7 +6,7 @@
 #include <string>
 #include <utility>
 
-#include "test/network/GraphUtils.h"
+#include "runtime/GraphUtils.h"
 #include "build/codegen/proto/voyager_ir.pb.h"
 
 // Where the interpreter hands an operation to whatever is actually computing.

@@ -10,7 +10,7 @@
 #include <stdexcept>
 
 #include "test/gold/GoldModel.h"
-#include "test/network/GraphUtils.h"
+#include "runtime/GraphUtils.h"
 #include "soc/firmware/common/voyager_address.h"
 
 static_assert(sizeof(host_request_t) == 200, "host_request_t layout");

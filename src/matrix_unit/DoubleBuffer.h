@@ -6,7 +6,7 @@
 #include "../AccelTypes.h"
 
 #ifndef __SYNTHESIS__
-#include "test/testbench/AccessCounter.h"
+#include "test/AccessCounter.h"
 #endif
 
 template <int depth, int width>

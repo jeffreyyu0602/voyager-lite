@@ -1,4 +1,4 @@
-#include "test/network/ArrayMemory.h"
+#include "runtime/ArrayMemory.h"
 
 #include <algorithm>
 #include <cstring>
@@ -9,7 +9,7 @@
 
 #include "src/ArchitectureParams.h"
 #include "src/datatypes/DataTypes.h"
-#include "test/network/Utils.h"
+#include "runtime/Utils.h"
 
 struct XorShift128Plus {
   uint64_t s[2];

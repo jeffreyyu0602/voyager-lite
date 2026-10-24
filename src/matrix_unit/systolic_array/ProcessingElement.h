@@ -8,7 +8,7 @@
 #ifdef CHECK_PE
 #include <regex>
 
-#include "test/checker/PEChecker.h"
+#include "test/PEChecker.h"
 #endif
 
 template <typename Input, typename Weight, typename Psum>

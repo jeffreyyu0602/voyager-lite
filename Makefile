@@ -101,7 +101,7 @@ LDLIBS_NO_SYSC += -L$(CONDA_PREFIX)/lib
 ###########################################################
 BUILD_DIR ?= build/$(DATATYPE)_$(IC_DIMENSION)x$(OC_DIMENSION)_$(INPUT_BUFFER_SIZE)x$(WEIGHT_BUFFER_SIZE)x$(ACCUM_BUFFER_SIZE)_$(DOUBLE_BUFFERED_ACCUM_BUFFER)_$(SUPPORT_MVM)_$(SUPPORT_SPMM)
 CC_BUILD_DIR = $(BUILD_DIR)/cc
-ALL_BUILD_DIRS = $(CC_BUILD_DIR) $(TOOLCHAIN_BUILD_DIRS)
+ALL_BUILD_DIRS = $(CC_BUILD_DIR)
 # Create build dirs automatically
 $(info $(shell mkdir -p $(ALL_BUILD_DIRS)))
 
@@ -288,13 +288,13 @@ rtl-sim-debug: rtl network-proto
 ###########################################################
 # SystemC / RTL harness
 ###########################################################
-$(CC_BUILD_DIR)/Harness.o: test/testbench/Harness.cc build/codegen/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/Harness.o: test/Harness.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/Harness-fast.o: test/testbench/Harness.cc build/codegen/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/Harness-fast.o: test/Harness.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -DCONNECTIONS_FAST_SIM -c -o $@ $<
 
-$(CC_BUILD_DIR)/Harness-checker.o: test/testbench/Harness.cc build/codegen/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/Harness-checker.o: test/Harness.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -DCONNECTIONS_FAST_SIM -DCHECK_PE -c -o $@ $<
 
 $(CC_BUILD_DIR)/GoldModel.o: test/gold/GoldModel.cc build/codegen/proto/voyager_ir.pb.cc
@@ -303,19 +303,19 @@ $(CC_BUILD_DIR)/GoldModel.o: test/gold/GoldModel.cc build/codegen/proto/voyager_
 $(CC_BUILD_DIR)/GoldModel-checker.o: test/gold/GoldModel.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -DCHECK_PE -g -c -o $@ $<
 
-$(CC_BUILD_DIR)/ArrayMemory.o: test/network/ArrayMemory.cc build/codegen/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/ArrayMemory.o: runtime/ArrayMemory.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
 $(CC_BUILD_DIR)/MapOperation.o: toolchain/MapOperation.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/PEChecker.o: test/checker/PEChecker.cc
+$(CC_BUILD_DIR)/PEChecker.o: test/PEChecker.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/AccessCounter.o: test/testbench/AccessCounter.cc build/codegen/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/AccessCounter.o: test/AccessCounter.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/Tiling.o: test/network/Tiling.cc build/codegen/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/Tiling.o: toolchain/Tiling.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
 
@@ -332,16 +332,16 @@ IR_OBJS = $(CC_BUILD_DIR)/Model.o $(CC_BUILD_DIR)/GraphUtils.o \
           $(CC_BUILD_DIR)/ArrayMemory.o $(CC_BUILD_DIR)/GoldModel.o \
           $(CC_BUILD_DIR)/Tiling.o $(CC_BUILD_DIR)/voyager_ir.pb.o
 
-$(CC_BUILD_DIR)/Simulation.o: test/network/Simulation.cc build/codegen/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/Simulation.o: test/Simulation.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/%.o: test/network/%.cc build/codegen/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/%.o: runtime/%.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/%Runner.o: test/testbench/%Runner.cc build/codegen/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/%Runner.o: test/%Runner.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/Checker.o: test/checker/Checker.cc build/codegen/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/Checker.o: test/Checker.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
 ###########################################################
@@ -350,7 +350,7 @@ $(CC_BUILD_DIR)/Checker.o: test/checker/Checker.cc build/codegen/proto/voyager_i
 SIM_OBJS = $(CC_BUILD_DIR)/TestRunner.o $(IR_OBJS) $(CC_BUILD_DIR)/MapOperation.o \
            $(CC_BUILD_DIR)/AccessCounter.o $(SPDLOG_OBJ_FILES)
 
-$(CC_BUILD_DIR)/TestRunner.o: test/testbench/TestRunner.cc build/codegen/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/TestRunner.o: test/TestRunner.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
 $(CC_BUILD_DIR)/TestRunner: $(CC_BUILD_DIR)/Harness.o $(SIM_OBJS)
@@ -397,7 +397,7 @@ fast-sim-debug: $(CC_BUILD_DIR)/TestRunner-fast network-proto
 ###########################################################
 # Developer targets that need no Catapult
 ###########################################################
-$(CC_BUILD_DIR)/AccuracyTester.o: test/testbench/AccuracyTester.cc build/codegen/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/AccuracyTester.o: test/AccuracyTester.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
 $(CC_BUILD_DIR)/AccuracyTester: $(CC_BUILD_DIR)/AccuracyTester.o $(IR_OBJS) $(SPDLOG_OBJ_FILES)
@@ -405,14 +405,6 @@ $(CC_BUILD_DIR)/AccuracyTester: $(CC_BUILD_DIR)/AccuracyTester.o $(IR_OBJS) $(SP
 
 .PHONY: AccuracyTester
 AccuracyTester: check_env_var $(CC_BUILD_DIR)/AccuracyTester
-
-.PHONY: ResNetAccuracy
-ResNetAccuracy: $(CC_BUILD_DIR)/AccuracyTester
-	./$(CC_BUILD_DIR)/AccuracyTester resnet18 data/imagenet_val 64
-
-.PHONY: MobileBertAccuracy
-MobileBertAccuracy: $(CC_BUILD_DIR)/AccuracyTester
-	./$(CC_BUILD_DIR)/AccuracyTester mobilebert data/bert_sst2_val 64
 
 ###########################################################
 # Toolchain

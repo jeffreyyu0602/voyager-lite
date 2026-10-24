@@ -1,4 +1,4 @@
-#include "test/network/GraphUtils.h"
+#include "runtime/GraphUtils.h"
 
 #include <algorithm>
 #include <stdexcept>

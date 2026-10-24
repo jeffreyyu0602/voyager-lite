@@ -9,12 +9,12 @@
 
 #include "AccelTypes.h"
 #include "ArchitectureParams.h"
-#include "test/testbench/AccessCounter.h"
-#include "test/network/ArrayMemory.h"
-#include "test/network/Backend.h"
-#include "test/network/Interpreter.h"
-#include "test/network/Model.h"
-#include "test/network/Utils.h"
+#include "test/AccessCounter.h"
+#include "runtime/ArrayMemory.h"
+#include "runtime/Backend.h"
+#include "runtime/Interpreter.h"
+#include "runtime/Model.h"
+#include "runtime/Utils.h"
 
 #ifndef CFLOAT
 #include "Accelerator.h"

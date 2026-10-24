@@ -19,7 +19,7 @@
 #include "spdlog/spdlog.h"
 #include "src/ArchitectureParams.h"
 #include "src/Params.h"
-#include "test/network/Tensor.h"
+#include "runtime/Tensor.h"
 // IWYU pragma: end_exports
 
 template <typename Container, typename T>

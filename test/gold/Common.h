@@ -10,8 +10,8 @@
 #include "ac_std_float_add_tree.h"
 #include "src/ArchitectureParams.h"
 #include "src/datatypes/DataTypes.h"
-#include "test/network/Tensor.h"
-#include "test/network/Utils.h"
+#include "runtime/Tensor.h"
+#include "runtime/Utils.h"
 // IWYU pragma: end_exports
 
 // Function to compute multi-dimensional indices from a flat index

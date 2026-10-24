@@ -6,8 +6,8 @@
 #include <utility>
 #include <vector>
 
-#include "test/network/ArrayMemory.h"
-#include "test/network/Simulation.h"
+#include "runtime/ArrayMemory.h"
+#include "test/Simulation.h"
 #include "soc/jtag/ScheduleRecorder.h"
 
 // Host-side pieces of the full JTAG flow: program AND data go over the debug

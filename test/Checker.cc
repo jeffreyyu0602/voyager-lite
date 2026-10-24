@@ -1,4 +1,4 @@
-#include "test/checker/Checker.h"
+#include "test/Checker.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -8,7 +8,7 @@
 #include <stdexcept>
 
 #include "spdlog/spdlog.h"
-#include "test/network/Utils.h"
+#include "runtime/Utils.h"
 
 namespace {
 

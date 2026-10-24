@@ -15,8 +15,8 @@
 #include "spdlog/spdlog.h"
 #include "src/ArchitectureParams.h"
 #include "src/datatypes/DataTypes.h"
-#include "test/network/Tensor.h"
-#include "test/network/Utils.h"
+#include "runtime/Tensor.h"
+#include "runtime/Utils.h"
 
 // Abstract class for interfacing with memory models.
 class MemoryInterface {

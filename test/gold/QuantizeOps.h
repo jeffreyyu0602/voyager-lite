@@ -4,8 +4,8 @@
 #include <vector>
 
 #include "src/datatypes/DataTypes.h"
-#include "test/network/GraphUtils.h"
-#include "test/network/Utils.h"
+#include "runtime/GraphUtils.h"
+#include "runtime/Utils.h"
 
 template <typename Input, typename Scale>
 std::shared_ptr<Input[]> quantize(std::any input, std::any scale,

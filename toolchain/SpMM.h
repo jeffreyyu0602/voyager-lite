@@ -5,9 +5,9 @@
 #include "ArchitectureParams.h"
 #include "spdlog/spdlog.h"
 #include "src/Params.h"
-#include "test/network/GraphUtils.h"
-#include "test/network/Tiling.h"
-#include "test/network/Utils.h"
+#include "runtime/GraphUtils.h"
+#include "toolchain/Tiling.h"
+#include "runtime/Utils.h"
 #include "toolchain/Common.h"
 
 void map_spmm(const voyager::Operation& operation, const ScalarEnv& env,

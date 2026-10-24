@@ -146,7 +146,7 @@ $(CC_BUILD_DIR)/jtag_sim_checker: toolchain $(JTAG_CHECKER_OBJS)
 
 jtag_sim_checker: $(CC_BUILD_DIR)/jtag_sim_checker
 
-$(CC_BUILD_DIR)/%.o: $(ACCEL_DIR)/test/network/%.cc
+$(CC_BUILD_DIR)/%.o: $(ACCEL_DIR)/runtime/%.cc
 	@mkdir -p $(CC_BUILD_DIR)
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
@@ -154,7 +154,7 @@ $(CC_BUILD_DIR)/%.o: $(ACCEL_DIR)/test/gold/%.cc
 	@mkdir -p $(CC_BUILD_DIR)
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/%.o: $(ACCEL_DIR)/test/checker/%.cc
+$(CC_BUILD_DIR)/%.o: $(ACCEL_DIR)/test/%.cc
 	@mkdir -p $(CC_BUILD_DIR)
 	$(CC) $(C17FLAGS) -c -o $@ $<
 

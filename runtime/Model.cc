@@ -1,4 +1,4 @@
-#include "test/network/Model.h"
+#include "runtime/Model.h"
 
 #include <google/protobuf/text_format.h>
 
@@ -10,7 +10,7 @@
 #include <stdexcept>
 
 #include "spdlog/spdlog.h"
-#include "test/network/Utils.h"
+#include "runtime/Utils.h"
 
 using google::protobuf::TextFormat;
 

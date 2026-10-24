@@ -7,8 +7,8 @@
 #include <any>
 #include <map>
 
-#include "test/network/MemoryInterface.h"
-#include "test/network/Tensor.h"
+#include "runtime/MemoryInterface.h"
+#include "runtime/Tensor.h"
 
 class ArrayMemory : public MemoryInterface {
  public:

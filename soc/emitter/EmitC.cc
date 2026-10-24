@@ -1,6 +1,6 @@
 // clang-format off
 // The params serialization needs the SystemC marshalling side of Params.h,
-// which test/network/Utils.h (reached through almost every toolchain header)
+// which runtime/Utils.h (reached through almost every toolchain header)
 // disables by defining NO_SYSC. Include the marshalling world first --
 // formatting must not resort these.
 #include <systemc.h>
@@ -17,7 +17,7 @@
 #include <iomanip>
 #include <stdexcept>
 
-#include "test/network/Utils.h"
+#include "runtime/Utils.h"
 #include "soc/firmware/common/host_request.h"
 #include "toolchain/MapOperation.h"
 // clang-format on

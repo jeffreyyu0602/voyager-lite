@@ -9,6 +9,7 @@ novas*
 *.fsdb*
 ucli.key
 verdiLog/
+fsdb2vcdLog/
 __pycache__
 *.py[cod]
 venv

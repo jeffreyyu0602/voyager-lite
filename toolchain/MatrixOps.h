@@ -2,11 +2,10 @@
 
 #include "spdlog/spdlog.h"
 #include "src/Params.h"
-#include "test/gold/GoldModel.h"
-#include "test/network/GraphUtils.h"
-#include "test/network/MemoryInterface.h"
-#include "test/network/Tiling.h"
-#include "test/network/Utils.h"
+#include "runtime/GraphUtils.h"
+#include "runtime/MemoryInterface.h"
+#include "toolchain/Tiling.h"
+#include "runtime/Utils.h"
 #include "toolchain/ApproximationConstants.h"
 #include "toolchain/Common.h"
 #if SUPPORT_SPMM

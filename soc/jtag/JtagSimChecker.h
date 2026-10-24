@@ -3,8 +3,8 @@
 #include <string>
 #include <vector>
 
-#include "test/network/ArrayMemory.h"
-#include "test/network/Simulation.h"
+#include "runtime/ArrayMemory.h"
+#include "test/Simulation.h"
 
 // Grades a full-JTAG run from the scratchpad dump GDB read back after the
 // firmware finished: the dump becomes the accelerator simulator's scratchpad

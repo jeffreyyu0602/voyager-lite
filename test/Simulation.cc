@@ -1,4 +1,4 @@
-#include "test/network/Simulation.h"
+#include "test/Simulation.h"
 
 #include <algorithm>
 #include <sstream>
@@ -7,8 +7,8 @@
 #include "spdlog/cfg/env.h"
 #include "spdlog/spdlog.h"
 #include "test/gold/GoldModel.h"
-#include "test/network/Interpreter.h"
-#include "test/network/Utils.h"
+#include "runtime/Interpreter.h"
+#include "runtime/Utils.h"
 
 namespace {
 

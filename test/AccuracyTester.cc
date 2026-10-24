@@ -23,12 +23,12 @@
 #include <vector>
 
 #include "src/ArchitectureParams.h"
-#include "test/network/ArrayMemory.h"
-#include "test/checker/Checker.h"
+#include "runtime/ArrayMemory.h"
+#include "test/Checker.h"
 #include "test/gold/GoldModel.h"
-#include "test/network/Interpreter.h"
-#include "test/network/Model.h"
-#include "test/network/Utils.h"
+#include "runtime/Interpreter.h"
+#include "runtime/Model.h"
+#include "runtime/Utils.h"
 
 namespace {
 

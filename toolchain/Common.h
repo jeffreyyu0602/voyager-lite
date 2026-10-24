@@ -6,8 +6,8 @@
 
 #include "spdlog/spdlog.h"
 #include "src/Params.h"
-#include "test/network/GraphUtils.h"
-#include "test/network/Utils.h"
+#include "runtime/GraphUtils.h"
+#include "runtime/Utils.h"
 #include "toolchain/ApproximationConstants.h"
 
 constexpr int MAX_LOOP_VALUE = 65535;

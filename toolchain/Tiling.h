@@ -2,7 +2,7 @@
 
 #include <iostream>
 
-#include "test/network/GraphUtils.h"
+#include "runtime/GraphUtils.h"
 #include "build/codegen/proto/voyager_ir.pb.h"
 
 struct Tiling {

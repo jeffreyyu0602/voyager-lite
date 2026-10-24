@@ -2,8 +2,8 @@
 
 #include <vector>
 
-#include "test/network/GraphUtils.h"
-#include "test/network/Utils.h"
+#include "runtime/GraphUtils.h"
+#include "runtime/Utils.h"
 #include "test/gold/Common.h"
 
 // The accumulator feedback depth SpMMUnit is built with. It is a pipelining

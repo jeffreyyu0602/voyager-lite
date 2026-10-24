@@ -6,9 +6,9 @@
 #include <string>
 #include <vector>
 
-#include "test/network/Backend.h"
-#include "test/network/GraphUtils.h"
-#include "test/network/MemoryInterface.h"
+#include "runtime/Backend.h"
+#include "runtime/GraphUtils.h"
+#include "runtime/MemoryInterface.h"
 
 // Runs one accelerator operation bit-accurately, in the same datatypes the RTL
 // uses. `kwargs` maps a buffer's node name to its contents, already fetched out

@@ -4,9 +4,9 @@
 #include <string>
 #include <vector>
 
-#include "test/network/Backend.h"
-#include "test/network/GraphUtils.h"
-#include "test/network/Model.h"
+#include "runtime/Backend.h"
+#include "runtime/GraphUtils.h"
+#include "runtime/Model.h"
 
 // One host-side step of a layer's program, in program order.
 //

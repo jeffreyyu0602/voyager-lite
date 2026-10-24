@@ -12,8 +12,8 @@
 #include <stdexcept>
 
 #include "test/gold/GoldModel.h"
-#include "test/network/GraphUtils.h"
-#include "test/network/Interpreter.h"
+#include "runtime/GraphUtils.h"
+#include "runtime/Interpreter.h"
 
 namespace {
 

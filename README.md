@@ -86,8 +86,9 @@ hf auth login
 
 - `/src`: SystemC implementation of the accelerator, one folder per unit
 - `/scripts`: Catapult `.tcl` scripts for RTL generation and synthesis configuration
-- `/test`: the SystemC testbench (`testbench/`), the runtime that loads and runs a compiled network (`network/`), the gold model (`gold/`) and the output checkers (`checker/`)
-- `/toolchain`: maps each compiled operation onto accelerator parameters
+- `/test`: the SystemC testbench, its test runners, the output checkers and the gold model (`gold/`)
+- `/runtime`: loads a compiled network and runs it: the graph, interpreter, tensors and memory model
+- `/toolchain`: tiles each compiled operation and maps it onto accelerator parameters
 - `/soc`: Chipyard integration: the Chisel wrapper (`src/`), the firmware emitter, firmware, JTAG tools and `run_voyager.py`
 - `/ci`: CI hardware configs, per-network compile settings and the layer skip list
 - `/lib`: External libraries and dependencies required by the project

@@ -6,9 +6,9 @@
 #include <utility>
 #include <vector>
 
-#include "test/network/Backend.h"
-#include "test/network/MemoryInterface.h"
-#include "test/network/Model.h"
+#include "runtime/Backend.h"
+#include "runtime/MemoryInterface.h"
+#include "runtime/Model.h"
 #include "build/codegen/proto/voyager_ir.pb.h"
 
 // Evaluates one scalar prim -- sym_ite or a binary arithmetic/comparison op --

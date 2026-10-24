@@ -1,11 +1,11 @@
 #pragma once
 
-#include "test/network/Tiling.h"
-#include "test/network/Utils.h"
+#include "toolchain/Tiling.h"
+#include "runtime/Utils.h"
 #include "test/gold/Common.h"
 
 #ifdef CHECK_PE
-#include "test/checker/PEChecker.h"
+#include "test/PEChecker.h"
 #endif
 
 template <typename T1, typename T2>

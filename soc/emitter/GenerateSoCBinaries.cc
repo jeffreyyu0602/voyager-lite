@@ -10,8 +10,8 @@
 
 #include "src/AccelTypes.h"
 #include "src/Params.h"
-#include "test/network/Model.h"
-#include "test/network/Utils.h"
+#include "runtime/Model.h"
+#include "runtime/Utils.h"
 #include "soc/emitter/EmitC.h"
 #include "soc/jtag/JtagPreload.h"
 

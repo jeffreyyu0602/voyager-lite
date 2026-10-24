@@ -1,11 +1,11 @@
-#include "test/network/Interpreter.h"
+#include "runtime/Interpreter.h"
 
 #include <algorithm>
 #include <stdexcept>
 
 #include "spdlog/spdlog.h"
-#include "test/network/GraphUtils.h"
-#include "test/network/Utils.h"
+#include "runtime/GraphUtils.h"
+#include "runtime/Utils.h"
 
 namespace {
 

@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "test/network/GraphUtils.h"
+#include "runtime/GraphUtils.h"
 #include "build/codegen/proto/voyager_ir.pb.h"
 
 // The loaded graph: model.txt parsed, its TensorBoxes indexed, and the

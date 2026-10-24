@@ -7,8 +7,8 @@
 #include <string>
 #include <vector>
 
-#include "test/network/GraphUtils.h"
-#include "test/network/Model.h"
+#include "runtime/GraphUtils.h"
+#include "runtime/Model.h"
 #include "soc/emitter/HostRequests.h"
 
 // Emits one layer's bufferized program as C for the control processor.

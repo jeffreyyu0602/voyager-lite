@@ -1,7 +1,7 @@
-#include "test/network/Tiling.h"
+#include "toolchain/Tiling.h"
 
 #include "spdlog/spdlog.h"
-#include "test/network/Utils.h"
+#include "runtime/Utils.h"
 
 // Used only inside this file: get_tiling picks between them.
 namespace {

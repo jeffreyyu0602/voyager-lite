@@ -1,6 +1,6 @@
 #include "soc/emitter/HostRequests.h"
 
-#include "test/network/GraphUtils.h"
+#include "runtime/GraphUtils.h"
 
 namespace {
 

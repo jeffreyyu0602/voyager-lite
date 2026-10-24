@@ -5,9 +5,9 @@
 #include <string>
 #include <vector>
 
-#include "test/network/ArrayMemory.h"
-#include "test/checker/Checker.h"
-#include "test/network/Model.h"
+#include "runtime/ArrayMemory.h"
+#include "test/Checker.h"
+#include "runtime/Model.h"
 
 // One simulation, configured from the environment.
 //

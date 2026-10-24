@@ -7,8 +7,8 @@
 // C++ kernel, the accelerator lowers the operation into params and hands it to
 // the DUT.
 
-#include "test/testbench/Harness.h"
-#include "test/network/Simulation.h"
+#include "test/Harness.h"
+#include "test/Simulation.h"
 
 extern "C" int sc_main(int argc, char* argv[]) {
   Simulation sim;

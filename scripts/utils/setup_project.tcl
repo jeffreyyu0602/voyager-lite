@@ -50,18 +50,18 @@ go new
 solution file add $ROOT/src/Accelerator.h -type CHEADER
 
 # Add testbench files
-solution file add $ROOT/test/testbench/TestRunner.cc -type C++ -exclude true
-solution file add $ROOT/test/testbench/Harness.cc -type C++ -exclude true
+solution file add $ROOT/test/TestRunner.cc -type C++ -exclude true
+solution file add $ROOT/test/Harness.cc -type C++ -exclude true
 solution file add $ROOT/test/gold/GoldModel.cc -type C++ -exclude true
-solution file add $ROOT/test/network/Simulation.cc -type C++ -exclude true
-solution file add $ROOT/test/checker/Checker.cc -type C++ -exclude true
-solution file add $ROOT/test/network/ArrayMemory.cc -type C++ -exclude true
-solution file add $ROOT/test/testbench/AccessCounter.cc -type C++ -exclude true
+solution file add $ROOT/test/Simulation.cc -type C++ -exclude true
+solution file add $ROOT/test/Checker.cc -type C++ -exclude true
+solution file add $ROOT/runtime/ArrayMemory.cc -type C++ -exclude true
+solution file add $ROOT/test/AccessCounter.cc -type C++ -exclude true
 solution file add $ROOT/toolchain/MapOperation.cc -type C++ -exclude true
 
 # Add the bufferized IR runtime
-solution file add $ROOT/test/network/Model.cc -type C++ -exclude true
-solution file add $ROOT/test/network/Interpreter.cc -type C++ -exclude true
-solution file add $ROOT/test/network/GraphUtils.cc -type C++ -exclude true
-solution file add $ROOT/test/network/Tiling.cc -type C++ -exclude true
+solution file add $ROOT/runtime/Model.cc -type C++ -exclude true
+solution file add $ROOT/runtime/Interpreter.cc -type C++ -exclude true
+solution file add $ROOT/runtime/GraphUtils.cc -type C++ -exclude true
+solution file add $ROOT/toolchain/Tiling.cc -type C++ -exclude true
 solution file add $ROOT/build/codegen/proto/voyager_ir.pb.cc -type C++ -exclude true

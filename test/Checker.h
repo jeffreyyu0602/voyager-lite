@@ -3,9 +3,9 @@
 #include <string>
 #include <vector>
 
-#include "test/network/ArrayMemory.h"
-#include "test/network/Model.h"
-#include "test/network/Utils.h"
+#include "runtime/ArrayMemory.h"
+#include "runtime/Model.h"
+#include "runtime/Utils.h"
 
 // Loads a buffer's contents from the compiler's float32 dump, through the
 // dtype's packing, at the address the graph gives it.
