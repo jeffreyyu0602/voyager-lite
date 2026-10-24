@@ -5,7 +5,7 @@ export PROJ_ROOT = $(shell pwd)
 # Compilers are different on different machines
 CC := $(CATAPULT_ROOT)/bin/g++
 
-export CODEGEN_DIR ?= test/compiler
+export CODEGEN_DIR ?= build/codegen
 
 # Check if the environment variable is set
 check_env_var:
@@ -101,7 +101,7 @@ LDLIBS_NO_SYSC += -L$(CONDA_PREFIX)/lib
 ###########################################################
 BUILD_DIR ?= build/$(DATATYPE)_$(IC_DIMENSION)x$(OC_DIMENSION)_$(INPUT_BUFFER_SIZE)x$(WEIGHT_BUFFER_SIZE)x$(ACCUM_BUFFER_SIZE)_$(DOUBLE_BUFFERED_ACCUM_BUFFER)_$(SUPPORT_MVM)_$(SUPPORT_SPMM)
 CC_BUILD_DIR = $(BUILD_DIR)/cc
-ALL_BUILD_DIRS = $(CC_BUILD_DIR) $(TOOLCHAIN_BUILD_DIRS)
+ALL_BUILD_DIRS = $(CC_BUILD_DIR)
 # Create build dirs automatically
 $(info $(shell mkdir -p $(ALL_BUILD_DIRS)))
 
@@ -130,14 +130,14 @@ export CATAPULT_BUILD_DIR ?= $(BUILD_DIR)/Catapult/$(TECHNOLOGY)/clock_$(CLOCK_P
 # Main target to run HLS and build RTL (Verilog)
 rtl: Accelerator
 
-# Generating RTL requires test/compiler/proto/voyager_ir.pb.cc to
+# Generating RTL requires build/codegen/proto/voyager_ir.pb.cc to
 # exist. But we don't want to add it as a dependency, as it would trigger a
 # rebuild of the rtl target every time the proto files change. Instead we create
 # a conditional dependency on the proto files, which will only create the proto
 # file if it doesn't exist.
 PROTOS_DEPENDENCY =
-ifeq (,$(wildcard test/compiler/proto/voyager_ir.pb.cc))
-PROTOS_DEPENDENCY += test/compiler/proto/voyager_ir.pb.cc
+ifeq (,$(wildcard build/codegen/proto/voyager_ir.pb.cc))
+PROTOS_DEPENDENCY += build/codegen/proto/voyager_ir.pb.cc
 endif
 
 RTL_DEPENDENCIES =
@@ -173,31 +173,31 @@ MulAddTree: $(CATAPULT_BUILD_DIR)/MulAddTree/MulAddTree.v1/concat_rtl.v
 DwCUnit: $(CATAPULT_BUILD_DIR)/DwCUnit/DwCUnit.v1/concat_rtl.v
 Accelerator: $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1/concat_rtl.v
 
-$(CATAPULT_BUILD_DIR)/InputController/InputController.v1/concat_rtl.v: src/InputController.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/InputController/InputController.v1/concat_rtl.v: src/matrix_unit/InputController.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=InputController catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/InputController.log
 
-$(CATAPULT_BUILD_DIR)/WeightController/WeightController.v1/concat_rtl.v: src/WeightController.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/WeightController/WeightController.v1/concat_rtl.v: src/matrix_unit/WeightController.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=WeightController catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/WeightController.log
 
-$(CATAPULT_BUILD_DIR)/ProcessingElement/ProcessingElement.v1/concat_rtl.v: src/ProcessingElement.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/ProcessingElement/ProcessingElement.v1/concat_rtl.v: src/matrix_unit/systolic_array/ProcessingElement.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=ProcessingElement catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/ProcessingElement.log
 
-$(CATAPULT_BUILD_DIR)/SystolicArrayRow/SystolicArrayRow.v1/concat_rtl.v: src/SystolicArray.h $(CATAPULT_BUILD_DIR)/ProcessingElement/ProcessingElement.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/SystolicArrayRow/SystolicArrayRow.v1/concat_rtl.v: src/matrix_unit/systolic_array/SystolicArray.h $(CATAPULT_BUILD_DIR)/ProcessingElement/ProcessingElement.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=SystolicArrayRow catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/SystolicArrayRow.log
 
-$(CATAPULT_BUILD_DIR)/SystolicArray/SystolicArray.v1/concat_rtl.v: src/SystolicArray.h $(CATAPULT_BUILD_DIR)/SystolicArrayRow/SystolicArrayRow.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/SystolicArray/SystolicArray.v1/concat_rtl.v: src/matrix_unit/systolic_array/SystolicArray.h $(CATAPULT_BUILD_DIR)/SystolicArrayRow/SystolicArrayRow.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=SystolicArray catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/SystolicArray.log
 
-$(CATAPULT_BUILD_DIR)/MatrixProcessor/MatrixProcessor.v1/concat_rtl.v: src/MatrixProcessor.h src/SystolicArray.h src/Skewer.h $(CATAPULT_BUILD_DIR)/SystolicArray/SystolicArray.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/MatrixProcessor/MatrixProcessor.v1/concat_rtl.v: src/matrix_unit/MatrixProcessor.h src/matrix_unit/systolic_array/SystolicArray.h src/matrix_unit/Skewer.h $(CATAPULT_BUILD_DIR)/SystolicArray/SystolicArray.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=MatrixProcessor catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/MatrixProcessor.log
 
-$(CATAPULT_BUILD_DIR)/MatrixParamsDeserializer/MatrixParamsDeserializer.v1/concat_rtl.v: src/ParamsDeserializer.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/MatrixParamsDeserializer/MatrixParamsDeserializer.v1/concat_rtl.v: src/common/ParamsDeserializer.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=MatrixParamsDeserializer catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/MatrixParamsDeserializer.log
 
@@ -205,7 +205,7 @@ $(CATAPULT_BUILD_DIR)/VectorFetchUnit/VectorFetchUnit.v1/concat_rtl.v: src/vecto
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=VectorFetchUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/VectorFetchUnit.log
 
-$(CATAPULT_BUILD_DIR)/VectorParamsDeserializer/VectorParamsDeserializer.v1/concat_rtl.v: src/ParamsDeserializer.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/VectorParamsDeserializer/VectorParamsDeserializer.v1/concat_rtl.v: src/common/ParamsDeserializer.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=VectorParamsDeserializer catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/VectorParamsDeserializer.log
 
@@ -236,7 +236,7 @@ $(CATAPULT_BUILD_DIR)/VectorUnit/VectorUnit.v1/concat_rtl.v: \
 	$(CATAPULT_BUILD_DIR)/VectorAccumulator/VectorAccumulator.v1/concat_rtl.v \
     $(CATAPULT_BUILD_DIR)/OutputController/OutputController.v1/concat_rtl.v \
     $(CATAPULT_BUILD_DIR)/VectorParamsDeserializer/VectorParamsDeserializer.v1/concat_rtl.v \
-	src/vector_unit/main.h $(PROTOS_DEPENDENCY)
+	src/vector_unit/VectorUnit.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=VectorUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/VectorUnit.log
 
@@ -246,24 +246,24 @@ $(CATAPULT_BUILD_DIR)/VectorMacUnit/VectorMacUnit.v1/concat_rtl.v: src/matrix_ve
 
 $(CATAPULT_BUILD_DIR)/MatrixVectorUnit/MatrixVectorUnit.v1/concat_rtl.v: \
 	$(CATAPULT_BUILD_DIR)/VectorMacUnit/VectorMacUnit.v1/concat_rtl.v \
-	src/matrix_vector_unit/main.h $(PROTOS_DEPENDENCY)
+	src/matrix_vector_unit/MatrixVectorUnit.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=MatrixVectorUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/MatrixVectorUnit.log
 
-$(CATAPULT_BUILD_DIR)/SpMMUnit/SpMMUnit.v1/concat_rtl.v: src/SpMMUnit.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/SpMMUnit/SpMMUnit.v1/concat_rtl.v: src/spmm_unit/SpMMUnit.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=SpMMUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/SpMMUnit.log
 
-$(CATAPULT_BUILD_DIR)/MulAddTree/MulAddTree.v1/concat_rtl.v: src/MulAddTree.h $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/MulAddTree/MulAddTree.v1/concat_rtl.v: src/dwc_unit/MulAddTree.h $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=MulAddTree catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/MulAddTree.log
-$(CATAPULT_BUILD_DIR)/DwCUnit/DwCUnit.v1/concat_rtl.v: src/DwCUnit.h $(CATAPULT_BUILD_DIR)/MulAddTree/MulAddTree.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
+$(CATAPULT_BUILD_DIR)/DwCUnit/DwCUnit.v1/concat_rtl.v: src/dwc_unit/DwCUnit.h $(CATAPULT_BUILD_DIR)/MulAddTree/MulAddTree.v1/concat_rtl.v $(PROTOS_DEPENDENCY)
 	mkdir -p $(CATAPULT_BUILD_DIR)
 	BLOCK=DwCUnit catapult -shell -file scripts/main.tcl -logfile $(CATAPULT_BUILD_DIR)/DwCUnit.log
 
 $(CATAPULT_BUILD_DIR)/Accelerator/Accelerator.v1/concat_rtl.v: \
 	src/Accelerator.h \
-	src/DoubleBuffer.h \
+	src/matrix_unit/DoubleBuffer.h \
 	$(CATAPULT_BUILD_DIR)/InputController/InputController.v1/concat_rtl.v \
 	$(CATAPULT_BUILD_DIR)/WeightController/WeightController.v1/concat_rtl.v \
 	$(CATAPULT_BUILD_DIR)/MatrixProcessor/MatrixProcessor.v1/concat_rtl.v \
@@ -288,34 +288,34 @@ rtl-sim-debug: rtl network-proto
 ###########################################################
 # SystemC / RTL harness
 ###########################################################
-$(CC_BUILD_DIR)/Harness.o: test/common/Harness.cc test/compiler/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/Harness.o: test/Harness.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/Harness-fast.o: test/common/Harness.cc test/compiler/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/Harness-fast.o: test/Harness.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -DCONNECTIONS_FAST_SIM -c -o $@ $<
 
-$(CC_BUILD_DIR)/Harness-checker.o: test/common/Harness.cc test/compiler/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/Harness-checker.o: test/Harness.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -DCONNECTIONS_FAST_SIM -DCHECK_PE -c -o $@ $<
 
-$(CC_BUILD_DIR)/GoldModel.o: test/common/GoldModel.cc test/compiler/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/GoldModel.o: test/gold/GoldModel.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -g -c -o $@ $<
 
-$(CC_BUILD_DIR)/GoldModel-checker.o: test/common/GoldModel.cc test/compiler/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/GoldModel-checker.o: test/gold/GoldModel.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -DCHECK_PE -g -c -o $@ $<
 
-$(CC_BUILD_DIR)/ArrayMemory.o: test/common/ArrayMemory.cc test/compiler/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/ArrayMemory.o: runtime/ArrayMemory.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/MapOperation.o: test/toolchain/MapOperation.cc test/compiler/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/MapOperation.o: toolchain/MapOperation.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/PEChecker.o: test/checker/PEChecker.cc
+$(CC_BUILD_DIR)/PEChecker.o: test/PEChecker.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/AccessCounter.o: test/common/AccessCounter.cc test/compiler/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/AccessCounter.o: test/AccessCounter.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/Tiling.o: test/common/Tiling.cc test/compiler/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/Tiling.o: toolchain/Tiling.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
 
@@ -332,16 +332,16 @@ IR_OBJS = $(CC_BUILD_DIR)/Model.o $(CC_BUILD_DIR)/GraphUtils.o \
           $(CC_BUILD_DIR)/ArrayMemory.o $(CC_BUILD_DIR)/GoldModel.o \
           $(CC_BUILD_DIR)/Tiling.o $(CC_BUILD_DIR)/voyager_ir.pb.o
 
-$(CC_BUILD_DIR)/Simulation.o: test/common/Simulation.cc test/compiler/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/Simulation.o: test/Simulation.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/%.o: test/common/%.cc test/compiler/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/%.o: runtime/%.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/%Runner.o: test/common/%Runner.cc test/compiler/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/%Runner.o: test/%Runner.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
-$(CC_BUILD_DIR)/Checker.o: test/common/Checker.cc test/compiler/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/Checker.o: test/Checker.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
 ###########################################################
@@ -350,7 +350,7 @@ $(CC_BUILD_DIR)/Checker.o: test/common/Checker.cc test/compiler/proto/voyager_ir
 SIM_OBJS = $(CC_BUILD_DIR)/TestRunner.o $(IR_OBJS) $(CC_BUILD_DIR)/MapOperation.o \
            $(CC_BUILD_DIR)/AccessCounter.o $(SPDLOG_OBJ_FILES)
 
-$(CC_BUILD_DIR)/TestRunner.o: test/common/TestRunner.cc test/compiler/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/TestRunner.o: test/TestRunner.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
 $(CC_BUILD_DIR)/TestRunner: $(CC_BUILD_DIR)/Harness.o $(SIM_OBJS)
@@ -397,7 +397,7 @@ fast-sim-debug: $(CC_BUILD_DIR)/TestRunner-fast network-proto
 ###########################################################
 # Developer targets that need no Catapult
 ###########################################################
-$(CC_BUILD_DIR)/AccuracyTester.o: test/common/AccuracyTester.cc test/compiler/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/AccuracyTester.o: test/AccuracyTester.cc build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
 $(CC_BUILD_DIR)/AccuracyTester: $(CC_BUILD_DIR)/AccuracyTester.o $(IR_OBJS) $(SPDLOG_OBJ_FILES)
@@ -406,32 +406,26 @@ $(CC_BUILD_DIR)/AccuracyTester: $(CC_BUILD_DIR)/AccuracyTester.o $(IR_OBJS) $(SP
 .PHONY: AccuracyTester
 AccuracyTester: check_env_var $(CC_BUILD_DIR)/AccuracyTester
 
-.PHONY: ResNetAccuracy
-ResNetAccuracy: $(CC_BUILD_DIR)/AccuracyTester
-	./$(CC_BUILD_DIR)/AccuracyTester resnet18 data/imagenet_val 64
-
-.PHONY: MobileBertAccuracy
-MobileBertAccuracy: $(CC_BUILD_DIR)/AccuracyTester
-	./$(CC_BUILD_DIR)/AccuracyTester mobilebert data/bert_sst2_val 64
-
 ###########################################################
 # Toolchain
 ###########################################################
+.PHONY: toolchain
 toolchain: $(CC_BUILD_DIR)/MapOperation.o $(CC_BUILD_DIR)/Tiling.o $(CC_BUILD_DIR)/voyager_ir.pb.o
 
 ###########################################################
 # Networks
 ###########################################################
-test/compiler/proto/voyager_ir.pb.cc: voyager-compiler/src/voyager_compiler/codegen/voyager_ir.proto
-	protoc -I=voyager-compiler/src/voyager_compiler/codegen --cpp_out=test/compiler/proto $<
+build/codegen/proto/voyager_ir.pb.cc: voyager-compiler/src/voyager_compiler/codegen/voyager_ir.proto
+	mkdir -p $(dir $@)
+	protoc -I=voyager-compiler/src/voyager_compiler/codegen --cpp_out=build/codegen/proto $<
 
-$(CC_BUILD_DIR)/voyager_ir.pb.o: test/compiler/proto/voyager_ir.pb.cc
+$(CC_BUILD_DIR)/voyager_ir.pb.o: build/codegen/proto/voyager_ir.pb.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
 .PHONY: network-proto
 network-proto: \
     $(CODEGEN_DIR)/networks/$(NETWORK)/$(DATATYPE)/model.txt \
-    test/compiler/proto/voyager_ir.pb.cc
+    build/codegen/proto/voyager_ir.pb.cc
 
 include codegen.mk
 
@@ -439,8 +433,9 @@ include codegen.mk
 # Cleanup Targets
 ###########################################################
 
+# Keeps build/codegen: compiled networks take hours to remake.
 clean-all:
-	rm -rf build/*
+	rm -rf $(filter-out build/codegen,$(wildcard build/*))
 
 clean: check_env_var
 	rm -rf $(CC_BUILD_DIR)
@@ -456,6 +451,6 @@ clean-rtl-sim: check_env_var
 
 clean-protos:
 	rm -rf $(CODEGEN_DIR)/networks/*
-	rm -rf test/compiler/proto/*.pb.*
+	rm -rf build/codegen/proto/*.pb.*
 
 .PHONY: clean clean-test clean-catapult clean-rtl-sim

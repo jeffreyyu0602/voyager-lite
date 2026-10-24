@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <iostream>
 
-#include "test/common/GraphUtils.h"
+#include "runtime/GraphUtils.h"
 
 SoCMemory::SoCMemory(const std::vector<uint64_t>& sizes)
     : ArrayMemory(sizes),

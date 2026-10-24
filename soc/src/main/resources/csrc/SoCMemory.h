@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-#include "test/common/ArrayMemory.h"
+#include "runtime/ArrayMemory.h"
 
 // The accelerator simulator's memory for SoC RTL simulation: the DRAM and
 // reference partitions are ordinary host arrays (inherited), while the

@@ -5,14 +5,14 @@
 
 #include "AccelTypes.h"
 #include "ArchitectureParams.h"
-#include "DwCUnit.h"
-#include "MatrixUnit.h"
+#include "dwc_unit/DwCUnit.h"
+#include "matrix_unit/MatrixUnit.h"
 #if SUPPORT_SPMM
-#include "SpMMUnit.h"
+#include "spmm_unit/SpMMUnit.h"
 #endif
-#include "matrix_vector_unit/main.h"
+#include "matrix_vector_unit/MatrixVectorUnit.h"
 #include "mc_scverify.h"
-#include "vector_unit/main.h"
+#include "vector_unit/VectorUnit.h"
 
 SC_MODULE(Accelerator) {
   sc_in<bool> CCS_INIT_S1(clk);

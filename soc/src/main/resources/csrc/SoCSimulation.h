@@ -8,9 +8,9 @@
 #include <vector>
 
 #include "SoCMemory.h"
-#include "test/common/Simulation.h"
-#include "test/soc/HostRequests.h"
-#include "test/soc/firmware/common/host_request.h"
+#include "test/Simulation.h"
+#include "soc/emitter/HostRequests.h"
+#include "soc/firmware/common/host_request.h"
 
 // The SoC RTL testbench: the DMA engine Sphinx does not have, plus the gold
 // reference and the grading.

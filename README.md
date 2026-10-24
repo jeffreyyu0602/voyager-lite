@@ -47,7 +47,6 @@ conda activate accelerator-env
 
 After activating the environment, install the required submodule packages:
 ```bash
-pip install ./interstellar
 pip install ./voyager-compiler
 ```
 
@@ -64,7 +63,7 @@ In the future, when initializing ```accelerator-env```, you may see a warning ab
 
 If conda is not being used, then please install the packages listed in the ```environment.yml``` file manually.
 
-This includes installing ```interstellar``` and ```voyager-compiler``` from their corresponding subdirectories.
+This includes installing ```voyager-compiler``` from its subdirectory.
 
 Please also source ```env.sh``` in the top directory every time you want to use the project.
 
@@ -85,12 +84,18 @@ hf auth login
 
 ## Repository Structure
 
-- `/data`: Test datasets and input data used for simulation and accuracy evaluation
+- `/src`: SystemC implementation of the accelerator, one folder per unit
+- `/scripts`: Catapult `.tcl` scripts for RTL generation and synthesis configuration
+- `/test`: the SystemC testbench, its test runners, the output checkers and the gold model (`gold/`)
+- `/runtime`: loads a compiled network and runs it: the graph, interpreter, tensors and memory model
+- `/toolchain`: tiles each compiled operation and maps it onto accelerator parameters
+- `/soc`: Chipyard integration: the Chisel wrapper (`src/`), the firmware emitter, firmware, JTAG tools and `run_voyager.py`
+- `/ci`: CI hardware configs, per-network compile settings and the layer skip list
 - `/lib`: External libraries and dependencies required by the project
-- `/models`: Pre-trained DNN model definitions and weights used for verification and evaluation
-- `/scripts`: Technology-specific `.tcl` scripts for RTL generation and synthesis configuration
-- `/src`: SystemC implementation of the accelerator architecture
-- `/test`: Testing infrastructure, including SystemC/C++ testbenches that invoke the accelerator
+- `/models`: Pre-trained DNN model weights used for verification and evaluation
+- `/utils`: clang-tidy HLS checks and the VCS waveform dump script
+- `/voyager-compiler`: the compiler that turns PyTorch models into accelerator programs
+- `build/` (generated): HLS output and objects per hardware config; `build/codegen` holds the compiled networks
 - `Makefile`: Build configuration for compiling the SystemC source code
 - `run_regression.py`: Main regression testing script that orchestrates accuracy evaluation, functional simulations, and RTL generation
 

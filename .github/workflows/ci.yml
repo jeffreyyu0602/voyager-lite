@@ -49,11 +49,11 @@ jobs:
           make -j4
           cd $PROJECT_ROOT
 
-          make test/compiler/proto/voyager_ir.pb.cc
+          make build/codegen/proto/voyager_ir.pb.cc
 
           for type in E4M3 MXINT8; do
             NETWORK=resnet18 DATATYPE=$type IC_DIMENSION=16 OC_DIMENSION=16 CLOCK_PERIOD=5 TECHNOLOGY=generic compiledb make -n TestRunner-fast
-            clang-tidy "-checks=hls-*,-clang-*" -load=utils/hls-tidy-plugin/build/libCatapultHlsChecks.so -p=$PROJECT_ROOT -header-filter="src/" test/common/Harness.cc > clang_tidy_output_$type.txt 2>&1 || true
+            clang-tidy "-checks=hls-*,-clang-*" -load=utils/hls-tidy-plugin/build/libCatapultHlsChecks.so -p=$PROJECT_ROOT -header-filter="src/" test/Harness.cc > clang_tidy_output_$type.txt 2>&1 || true
           done
       - name: Generate GitHub PR Annotations
         run: |

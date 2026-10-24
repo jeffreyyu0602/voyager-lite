@@ -433,18 +433,6 @@ def run_accuracy(model, dataset, num_processes, output_folder):
         output_data_dir = "data/sst2"
     elif dataset == "squad":
         output_data_dir = "data/squad"
-        subprocess.run(
-            [
-                "python",
-                "test/script/dump_bert_dataset.py",
-                "--dataset",
-                "squad",
-                "--model_name_or_path",
-                model_path,
-                "--output_dir",
-                output_data_dir,
-            ]
-        )
     else:
         raise ValueError("Invalid dataset")
 
@@ -556,7 +544,7 @@ def run_accuracy(model, dataset, num_processes, output_folder):
                 *quantization_args,
                 *common_flags,
                 "--model_output_dir",
-                "test/compiler/networks/" + model + "/" + env_vars["DATATYPE"],
+                "build/codegen/networks/" + model + "/" + env_vars["DATATYPE"],
                 "--dump_dataset",
                 "--dataset_output_dir",
                 output_data_dir,
@@ -684,7 +672,7 @@ def main():
     skip_rules = []
 
     if args.skip_layers:
-        with open("ci_skip_rules.json", "r") as f:
+        with open("ci/skip_rules.json", "r") as f:
             skip_rules = json.load(f)
 
     rtl_build_future = None

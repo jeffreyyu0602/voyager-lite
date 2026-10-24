@@ -29,8 +29,8 @@ No root access is needed for any of it.
 
 Requirements: outgoing HTTPS to github.com, `~/miniforge3` (the jobs create
 their conda envs with it), `modulecmd` with the CAD modules `ci.yml` loads,
-SSH access to `code.stanford.edu` (`physical-design` and `internal-tech`
-submodules), and a few GB per copy plus about 15 GB per running RTL job.
+SSH access to `code.stanford.edu` (the `internal-tech` submodule), and a few
+GB per copy plus about 15 GB per running RTL job.
 
 1. Download the runner and check it against the SHA-256 on the release page
    (https://github.com/actions/runner/releases):
