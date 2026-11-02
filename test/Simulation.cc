@@ -53,8 +53,8 @@ Simulation::Simulation()
   model.print_summary();
 
   // TESTS names a layer; its layers.txt extent is the smallest runnable thing
-  // and is self-contained (allocs, credit fills, tile loop, drain), so the
-  // selection runs as-is.
+  // and is self-contained (allocs, counter resets, tile loop, epilogue), so
+  // the selection runs as-is.
   selection = model.selected_ops(split(getenv("TESTS", ""), ','));
   spdlog::info("Running {} top-level operation(s)\n", selection.ops.size());
 
@@ -134,6 +134,7 @@ void Simulation::run_gold() {
   GoldBackend backend(array);
   Interpreter interpreter(model, array, &backend);
   interpreter.run(selection);
+  interpreter.log_counters();
 
   const std::string name = getenv("TESTS", model_name);
 

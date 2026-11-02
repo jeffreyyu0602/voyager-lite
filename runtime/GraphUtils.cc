@@ -71,8 +71,22 @@ std::string strip_namespace(const std::string& target) {
 // Tensor boxes
 // ===========================================================================
 
-bool is_semaphore(const voyager::TensorBox& box) {
+bool is_counter(const voyager::TensorBox& box) {
   return box.memory().level() == voyager::MEMORY_LEVEL_REGISTER;
+}
+
+int64_t counter_id(const voyager::TensorBox& box) {
+  if (!is_counter(box)) {
+    throw std::runtime_error("TensorBox " + box.node() +
+                             " is not a counter (not at register level).");
+  }
+  const int64_t id = static_cast<int64_t>(box.memory().address());
+  if (id < 0 || id >= NUM_COUNTERS) {
+    throw std::runtime_error("Counter " + box.node() + " has id " +
+                             std::to_string(id) + "; the hardware has " +
+                             std::to_string(NUM_COUNTERS) + " counters.");
+  }
+  return id;
 }
 
 bool is_constant(const voyager::TensorBox& box) {
@@ -113,7 +127,7 @@ Tensor to_tensor(const voyager::TensorBox& box, int64_t bank) {
   tensor.node = box.node();
   tensor.shape.assign(box.shape().begin(), box.shape().end());
   tensor.dtype = box.dtype();
-  tensor.partition = is_semaphore(box) ? DRAM_PARTITION : partition_of(box);
+  tensor.partition = partition_of(box);
   tensor.address = box.memory().address() + bank * bank_stride_of(box);
   tensor.materialized = true;
   tensor.is_constant = is_constant(box);
@@ -486,62 +500,6 @@ std::vector<Tensor> resolve_outputs(const voyager::Operation& op,
   return outputs;
 }
 
-int64_t semaphore_slots(const voyager::TensorBox& box) {
-  int64_t slots = banks_of(box);
-  for (const auto dim : box.shape()) slots *= dim;
-  return slots;
-}
-
-int64_t resolve_bank(const voyager::TensorBoxRef& ref, const ScalarEnv& env,
-                     const std::string& op_name) {
-  const voyager::TensorBox& box = ref.box();
-  const int dims = box.shape_size();
-  if (dims == 0 || ref.offsets_size() == 0)
-    return select_bank(ref, env, op_name);
-
-  const auto reject = [&](const std::string& why) {
-    throw std::runtime_error("Semaphore TensorBoxRef " + box.node() +
-                             " in operation " + op_name + " (" + why + ").");
-  };
-
-  // [bank, *dims], one counter selected.
-  const int bank_dims = banks_of(box) > 1 ? 1 : 0;
-  if (ref.offsets_size() != dims + bank_dims ||
-      ref.sizes_size() != dims + bank_dims) {
-    reject("rank is not bank_count + the semaphore array's rank");
-  }
-  for (int d = 0; d < ref.sizes_size(); d++) {
-    if (ref.sizes(d) != 1) reject("selects more than one counter");
-  }
-
-  int64_t bank = 0;
-  if (bank_dims == 1) {
-    bank = eval_int(ref.offsets(0), env);
-    const uint32_t banks = banks_of(box);
-    if (bank < 0 || bank >= static_cast<int64_t>(banks)) {
-      reject("bank index " + std::to_string(bank) + " is out of range for " +
-             std::to_string(banks) + " banks");
-    }
-  }
-
-  int64_t index = 0;
-  for (int d = 0; d < dims; d++) {
-    const int64_t extent = box.shape(d);
-    const int64_t offset = eval_int(ref.offsets(d + bank_dims), env);
-    if (offset < 0 || offset >= extent) {
-      reject("index " + std::to_string(offset) +
-             " is out of range on "
-             "dimension " +
-             std::to_string(d) + " (extent " + std::to_string(extent) + ")");
-    }
-    index = index * extent + offset;
-  }
-
-  int64_t elements = 1;
-  for (const auto dim : box.shape()) elements *= dim;
-  return bank * elements + index;
-}
-
 // ===========================================================================
 // Data movement
 // ===========================================================================
@@ -607,6 +565,12 @@ void run_async_copy(const voyager::PrimOp& prim, const ScalarEnv& env,
         "async_copy " + name + ": buffer operand " + buffer.node +
         " has rank " + std::to_string(buffer_shape.size()) +
         " but the copy moves a rank-" + std::to_string(rank) + " tile.");
+  }
+
+  // A 0-d copy moves its one element (a run-time scalar staged on chip).
+  if (rank == 0) {
+    copy_run(memory, src, 0, dst, 0, 1);
+    return;
   }
 
   // Scatter the tile index across the dimensions the copy actually tiles.

@@ -5,6 +5,7 @@
 #include <systemc.h>
 
 #include <deque>
+#include <memory>
 #include <vector>
 
 #include "AccelTypes.h"
@@ -253,22 +254,18 @@ struct Harness : public sc_module, public Backend {
   // Backend: run one accelerator operation on the DUT.
   void execute(const voyager::Operation& op, const ScalarEnv& env) override;
 
-  // Backend: asynchronous commits. The walk pushes a commit's params and moves
-  // on -- the units' double-buffered controllers start fetching the next
-  // tile's operands while the current tile computes -- and two threads pace
-  // the start/done handshakes. wait_semaphore blocks the walk until the
-  // completion thread posts, which is the back-pressure that keeps the walk at
-  // most one ping-pong slot ahead of the hardware.
-  bool is_committed_async() const override { return true; }
-  void begin_commit() override;
-  void end_commit(bool has_post, const std::string& post_node,
-                  int64_t post_slot, int64_t post_amount) override;
-  void init_semaphore(const std::string& node, int64_t slot,
-                      int64_t value) override;
-  void post_semaphore(const std::string& node, int64_t slot,
-                      int64_t amount) override;
-  void wait_semaphore(const std::string& node, int64_t slot,
-                      int64_t amount) override;
+  // Backend: the counters as the hardware keeps them. The walk pushes a
+  // commit's params and moves on -- the units' double-buffered controllers
+  // start fetching the next tile's operands while the current tile computes
+  // -- so a commit's waits go to the passes it dispatches and its post fires
+  // when the last of them retires; a CPU wait blocks the walk, which is the
+  // back-pressure that keeps it in step with the hardware.
+  void begin_commit(const CommitSync& sync) override;
+  void end_commit() override;
+  void reset_counter(int64_t id, const std::string& node) override;
+  void add_counter(int64_t id) override;
+  void wait_counter(int64_t id, int64_t threshold,
+                    const std::string& op) override;
 
  private:
   const Model& model;
@@ -371,67 +368,113 @@ struct Harness : public sc_module, public Backend {
 
   void reset();
 
-  // One params group in flight: which units it started, and what to do when
-  // it retires. A group with no units is a commit's post token -- it rides
-  // the queues behind the commit's groups so the post fires only after every
-  // group ahead of it has retired.
-  struct InvocationGroup {
-    bool matrix = false;
-    bool matrix_vector = false;
-    bool spmm = false;
-    bool dwc = false;
-    bool vector = false;
-    // Set on the first / last group of an operation, for the per-op logging
-    // and access summary. start_time is filled in by release_starts on the
-    // op_end group.
-    const voyager::Operation* op_begin = nullptr;
-    const voyager::Operation* op_end = nullptr;
-    sc_time start_time;
-    bool has_post = false;
-    std::string post_node;
-    int64_t post_slot = 0;
-    int64_t post_amount = 0;
+  // A commit the walk has opened: its waits and post, which of its wait
+  // groups a dispatched pass has taken, and how many of its params groups are
+  // still in flight. The post fires once the walk has closed the commit and
+  // its last group has retired.
+  struct Commit {
+    CommitSync sync;
+    bool matrix_waits_taken = false;
+    bool vector_waits_taken = false;
+    long groups = 0;
+    long groups_left = 0;
+    bool closed = false;
   };
 
-  // A counting semaphore the walk can block on while another thread posts.
-  struct SyncSemaphore {
-    int64_t count = 0;
-    sc_event posted;
+  // One operation's start, stamped by the first of its passes to start and
+  // read when its last group retires.
+  struct OpTiming {
+    const voyager::Operation* op = nullptr;
+    bool started = false;
+    sc_time start;
   };
 
-  std::map<std::pair<std::string, int64_t>, SyncSemaphore> sync_semaphores;
-  std::deque<InvocationGroup> start_queue;
-  std::deque<InvocationGroup> done_queue;
-  sc_event start_pushed;
-  sc_event done_pushed;
-  sc_event group_retired;
-  sc_time op_release_time;
-  long pending_groups = 0;
-  bool in_commit = false;
+  // One params group in flight: how many of its passes have yet to retire,
+  // the commit it belongs to, and whether it closes its operation.
+  struct Group {
+    int passes_left = 0;
+    std::shared_ptr<Commit> commit;
+    std::shared_ptr<OpTiming> timing;
+    bool last = false;
+  };
 
-  // The SoC integration gates vector_unit_start_rdy on its vector inflight
-  // count being zero (soc/src/main/scala/Voyager.scala), so consecutive
-  // vector passes never overlap: a pass can never fetch a tile the previous
-  // pass's output controller is still writing. release_starts applies the
-  // same gate here so the testbench is no more permissive than the SoC.
-  long vector_inflight = 0;
-  sc_event vector_retired;
+  // One pass queued on a unit: the waits it starts behind, its group, and the
+  // unit sequence number of the previous pass of the same operation on this
+  // unit, which must retire first (-1 for none).
+  struct Pass {
+    std::vector<CounterWait> waits;
+    std::shared_ptr<Group> group;
+    long after = -1;
+  };
 
-  // Serialize one operation's params to the units and queue its invocation
-  // groups; does not wait for them to execute.
+  // A unit's in-order queues and handshakes. Passes start in queue order,
+  // each once its waits hold, and retire in the same order. Passes are
+  // numbered on their unit in dispatch order; `retired` counts those done.
+  struct Unit {
+    const char* name;
+    Connections::SyncChannel* start;
+    Connections::SyncChannel* done;
+    std::deque<Pass> to_start;
+    std::deque<Pass> to_retire;
+    sc_event pushed;
+    sc_event started;
+    long dispatched = 0;
+    long retired = 0;
+    sc_event pass_retired;
+  };
+
+  Unit matrix_unit_queue{"matrix unit", &matrix_unit_start, &matrix_unit_done};
+  Unit vector_unit_queue{"vector unit", &vector_unit_start, &vector_unit_done};
+#if SUPPORT_MVM
+  Unit matrix_vector_unit_queue{"matrix-vector unit",
+                                &matrix_vector_unit_start,
+                                &matrix_vector_unit_done};
+#endif
+#if SUPPORT_SPMM
+  Unit spmm_unit_queue{"spmm unit", &spmm_unit_start, &spmm_unit_done};
+#endif
+#if SUPPORT_DWC
+  Unit dwc_unit_queue{"dwc unit", &dwc_unit_start, &dwc_unit_done};
+#endif
+
+  sc_event counter_changed[NUM_COUNTERS];
+  // Dispatched passes that have yet to add to each counter: a reset while one
+  // is outstanding would lose its post.
+  long posts_pending[NUM_COUNTERS] = {};
+  std::shared_ptr<Commit> open_commit;
+
+  // Serialize one operation's params to the units and queue a pass on each
+  // unit it drives; does not wait for them to execute.
   void dispatch_params(const voyager::Operation& op,
                        const std::deque<BaseParams*>& params);
 
-  // Block the walk until every queued group has retired.
-  void drain();
+  // Adds 1 to the commit's post counter, if it has one.
+  void post_commit(Commit& commit);
 
   // The thread that drives the DUT: it walks the graph exactly as the gold
   // model does -- same loops, same conditionals, same DMAs -- and dispatches
-  // each accelerator operation through execute() above. Two companion threads
-  // pace the handshakes so consecutive tiles overlap in the datapath.
+  // each accelerator operation through execute() above. Two threads per unit
+  // pace its start and done handshakes so consecutive tiles overlap in the
+  // datapath.
   void run_walker();
-  void release_starts();
-  void retire_dones();
+  void drive_starts(Unit& unit);
+  void drive_dones(Unit& unit);
+  void matrix_unit_starts();
+  void matrix_unit_dones();
+  void vector_unit_starts();
+  void vector_unit_dones();
+#if SUPPORT_MVM
+  void matrix_vector_unit_starts();
+  void matrix_vector_unit_dones();
+#endif
+#if SUPPORT_SPMM
+  void spmm_unit_starts();
+  void spmm_unit_dones();
+#endif
+#if SUPPORT_DWC
+  void dwc_unit_starts();
+  void dwc_unit_dones();
+#endif
 };
 
 #endif

@@ -8,7 +8,7 @@ import chisel3.experimental.{BaseModule, IntParam}
 import freechips.rocketchip.amba.axi4._
 import freechips.rocketchip.subsystem.{BaseSubsystem, PBUS, SBUS}
 import freechips.rocketchip.diplomacy._
-import freechips.rocketchip.regmapper.{HasRegMap, RegField, RegFieldDesc}
+import freechips.rocketchip.regmapper.{HasRegMap, RegField, RegFieldDesc, RegWriteFn}
 import freechips.rocketchip.resources.SimpleDevice
 import freechips.rocketchip.subsystem.SystemBusKey
 import freechips.rocketchip.tilelink._
@@ -328,8 +328,21 @@ class Accelerator(
   val chipyardDir = System.getProperty("user.dir")
   val voyagerDir  = s"$chipyardDir/generators/voyager"
 
+  // The HLS build directory, relative to generators/voyager (the Catapult
+  // scripts join it to that root): the parameter set's own unless
+  // VOYAGER_BUILD_DIR names another, so a test build never touches a cache
+  // that cannot be regenerated.
+  val paramsDir = s"""${datatype}_${icDimension}x${ocDimension}_
+                     |${inputBufferSize}x${weightBufferSize}x${accumBufferSize}_
+                     |${doubleBufferedAccumBuffer}_${supportMVM}_${supportSpmm}
+                     |""".stripMargin.replaceAll("\n", "")
+  val buildDir  = sys.env.getOrElse("VOYAGER_BUILD_DIR", s"build/$paramsDir")
+  require(!buildDir.startsWith("/"), "VOYAGER_BUILD_DIR must be relative to generators/voyager")
+  val buildPath = s"$voyagerDir/$buildDir"
+
   // Call Voyager to generate RTL
   val makeStr = s"""make -C $voyagerDir -j rtl
+                   | BUILD_DIR=$buildDir
                    | DATATYPE=$datatype
                    | IC_DIMENSION=$icDimension
                    | OC_DIMENSION=$ocDimension
@@ -347,14 +360,9 @@ class Accelerator(
   require(makeStr.! == 0, "Failed to run RTL generation for Voyager")
 
   // Add the path to the generated Verilog
-  val genVerilogPath = s"""$voyagerDir/build/
-                          |${datatype}_${icDimension}x${ocDimension}_
-                          |${inputBufferSize}x${weightBufferSize}x${accumBufferSize}_
-                          |${doubleBufferedAccumBuffer}_${supportMVM}_${supportSpmm}/
-                          |Catapult/${technology}/clock_${clockPeriod}/
-                          |Accelerator/Accelerator.v1/concat_rtl.v
-                          |""".stripMargin.replaceAll("\n", "")
-  addPath(s"$genVerilogPath")
+  val genVerilogPath =
+    s"$buildPath/Catapult/$technology/clock_$clockPeriod/Accelerator/Accelerator.v1/concat_rtl.v"
+  addPath(genVerilogPath)
 
   // Get value of environment variable CONFIG
   val config = System.getenv("CONFIG")
@@ -569,46 +577,82 @@ class TLVoyager(
       val voyager_base_addr = Reg(UInt(64.W))
       val voyager_reg_map   = ArrayBuffer[(Int, Seq[RegField])]()
 
-      val numSemaphores = 8
-      val semaphores    = RegInit(VecInit(Seq.fill(numSemaphores)(0.U(8.W))))
+      // -------------------------------
+      // Synchronization counters
+      // -------------------------------
+      // 32 count-up counters shared by the units and the DMA engine. Each
+      // unit's UnitSync (Sync.scala) holds the waits and the post of every
+      // pass dispatched on it. Register map: soc/firmware/common/voyager_address.h.
+      val numCounters = 32
+      val counters    = RegInit(VecInit(Seq.fill(numCounters)(0.U(32.W))))
 
-      // Default wires for optional units (prevents compilation errors if they are disabled)
-      val mvm_dec_sem   = WireDefault(false.B)
-      val mvm_wait_id   = WireDefault(0.U(log2Ceil(numSemaphores).W))
-      val mvm_inc_sem   = WireDefault(false.B)
-      val mvm_signal_id = WireDefault(0.U(log2Ceil(numSemaphores).W))
+      // Unit order: matrix, vector, mvm, spmm (the firmware's unit codes). How
+      // far the CPU runs ahead is bounded by a unit's params path alone: the
+      // one-word queue below plus the records its deserializer and dispatch
+      // thread hold, at most two complete passes and a third's DISPATCH
+      // before a params write stalls. Three dispatched passes carry at most
+      // 15 waits; passes started and not done are bounded by the unit's
+      // own pipeline, fewer than the started queue holds.
+      val syncs = Seq.fill(4) {
+        Module(new UnitSync(numCounters, waitDepth = 16, passDepth = 4, startedDepth = 8))
+      }
+      syncs.foreach { sync =>
+        sync.io.counters           := counters
+        sync.io.start_vld          := false.B
+        sync.io.done               := false.B
+        sync.io.wait_req.valid     := false.B
+        sync.io.wait_req.bits      := 0.U
+        sync.io.post_req.valid     := false.B
+        sync.io.post_req.bits      := 0.U
+        sync.io.dispatch_req.valid := false.B
+        sync.io.dispatch_req.bits  := 0.U
+      }
 
-      val spmm_dec_sem   = WireDefault(false.B)
-      val spmm_wait_id   = WireDefault(0.U(log2Ceil(numSemaphores).W))
-      val spmm_inc_sem   = WireDefault(false.B)
-      val spmm_signal_id = WireDefault(0.U(log2Ceil(numSemaphores).W))
+      // The DMA engine's completion port: +1 to a counter when a copy lands.
+      val counter_add_port = Module(new CounterAddPort)
 
-      // DMA is not implemented yet; use MMIO-driven pulse registers to emulate DMA completion/wait
-      val dma_dec_sem   = RegInit(false.B)
-      val dma_wait_id   = RegInit(0.U(log2Ceil(numSemaphores).W))
-      val dma_inc_sem   = RegInit(false.B)
-      val dma_signal_id = RegInit(0.U(log2Ceil(numSemaphores).W))
+      // CPU-side reset and add of one counter: the add stands in for a copy's
+      // completion when the data is preloaded (full JTAG mode, the chip).
+      val ctr_reset = Wire(Decoupled(UInt(8.W)))
+      ctr_reset.ready := true.B
+      val ctr_add = Wire(Decoupled(UInt(8.W)))
+      ctr_add.ready := true.B
 
-      // Auto-clear the pulse bits after one cycle so each MMIO write triggers at most one
-      // semaphore update (prevents repeated inc/dec across cycles).
-      when(dma_inc_sem) { dma_inc_sem := false.B }
-      when(dma_dec_sem) { dma_dec_sem := false.B }
+      for (i <- 0 until numCounters) {
+        val posts = syncs.map(sync => sync.io.posted.valid && sync.io.posted.bits === i.U)
+        val added = Seq(
+          counter_add_port.io.add_vld && counter_add_port.io.add_id === i.U,
+          ctr_add.valid && ctr_add.bits === i.U,
+        )
+        val incs  = (posts ++ added).map(_.asUInt).reduce(_ +& _)
+        when(ctr_reset.valid && ctr_reset.bits === i.U) {
+          counters(i) := 0.U
+        }.elsewhen(incs =/= 0.U) {
+          counters(i) := counters(i) + incs
+        }
+      }
+
+      // The mailbox doorbell: a count the firmware advances by writing the
+      // register; the SoC testbench (VerificationCollateral.v) services the
+      // mailbox when it changes.
+      val doorbell = RegInit(0.U(32.W))
+      dontTouch(doorbell)
+      val ring_doorbell = RegWriteFn((valid: Bool, data: UInt) => {
+        when(valid) { doorbell := doorbell + 1.U }
+        true.B
+      })
 
       voyager_reg_map ++= Seq(
-        0x500 -> Seq(RegField(1, dma_dec_sem)),
-        0x508 -> Seq(RegField(log2Ceil(numSemaphores), dma_wait_id)),
-        0x510 -> Seq(RegField(1, dma_inc_sem)),
-        0x518 -> Seq(RegField(log2Ceil(numSemaphores), dma_signal_id)),
+        0x500 -> Seq(RegField(32, doorbell, ring_doorbell)),
+        0x508 -> Seq(RegField.w(8, ctr_reset)),
+        0x510 -> Seq(RegField.w(8, ctr_add)),
       )
+      voyager_reg_map ++= (0 until numCounters).map { i =>
+        (0x600 + 8 * i) -> Seq(RegField.r(32, counters(i)))
+      }
 
       val bank_0_loaded = RegInit(false.B)
       val bank_1_loaded = RegInit(false.B)
-
-      // Inflight counters for each unit
-      val matrix_op_inflight        = RegInit(0.U(2.W))
-      val matrix_vector_op_inflight = RegInit(0.U(2.W))
-      val spmm_op_inflight          = RegInit(0.U(2.W))
-      val vector_op_inflight        = RegInit(0.U(2.W))
 
       val io_map = accelerator.io.elements
 
@@ -664,6 +708,27 @@ class TLVoyager(
         (addr_q, data_q)
       }
 
+      // A unit's start and done handshakes through its UnitSync, and its
+      // register block at `base` (layout in voyager_address.h).
+      def connectUnit(unit: Int, prefix: String, params_q: Queue[UInt], base: Int): Unit = {
+        val sync = syncs(unit)
+        io_map(s"${prefix}_start_rdy") := sync.io.start_rdy
+        sync.io.start_vld              := bool(s"${prefix}_start_vld")
+        io_map(s"${prefix}_done_rdy")  := true.B
+        sync.io.done                   := bool(s"${prefix}_done_vld")
+
+        val cycle_count = WideCounter(64, sync.io.running)
+
+        voyager_reg_map ++= Seq(
+          base + 0x00 -> Seq(RegField.w(64, params_q.io.enq)),
+          base + 0x08 -> Seq(RegField.r(64, cycle_count.value)),
+          base + 0x10 -> Seq(RegField.r(8, sync.io.inflight)),
+          base + 0x18 -> Seq(RegField.w(64, sync.io.wait_req)),
+          base + 0x20 -> Seq(RegField.w(8, sync.io.post_req)),
+          base + 0x28 -> Seq(RegField.w(8, sync.io.dispatch_req)),
+        )
+      }
+
       io_map("clk")  := clock
       io_map("rstn") := ~(reset.asBool)
 
@@ -692,47 +757,7 @@ class TLVoyager(
           connectInput("matrix_unit_weight_scale", ocPortWidth, matrix_unit_weight_scale_interface)
       }
 
-      // --- Matrix Unit Sync Config ---
-      val mu_wait_en   = RegInit(false.B)
-      val mu_wait_id   = RegInit(0.U(log2Ceil(numSemaphores).W))
-      val mu_signal_en = RegInit(false.B)
-      val mu_signal_id = RegInit(0.U(log2Ceil(numSemaphores).W))
-
-      io_map("matrix_unit_start_rdy") := !mu_wait_en || (semaphores(mu_wait_id) > 0.U)
-      io_map("matrix_unit_done_rdy")  := 1.U
-
-      val mu_start_fire = bool("matrix_unit_start_rdy") && bool("matrix_unit_start_vld")
-      val mu_dec_sem    = mu_start_fire && mu_wait_en
-
-      // BUG, kept as taped out (Sphinx silicon): a start and a done in the same
-      // cycle keep only the decrement below (last connect), so the count reads
-      // one low, accel_running drops early, and the next real idle wraps it to
-      // 3 (busy forever). Seen 2026-09-07, spmm up_proj at 16 tiles.
-      when(mu_start_fire) {
-        assert(matrix_op_inflight =/= 2.U, "Matrix inflight overflow!")
-        matrix_op_inflight := matrix_op_inflight + 1.U
-      }
-
-      val mu_done_fire = bool("matrix_unit_done_rdy") && bool("matrix_unit_done_vld")
-      val mu_inc_sem   = mu_done_fire && mu_signal_en // Trigger increment
-
-      when(mu_done_fire) {
-        assert(matrix_op_inflight =/= 0.U, "Matrix done with no inflight!")
-        matrix_op_inflight := matrix_op_inflight - 1.U
-      }
-
-      val matrix_unit_running     = matrix_op_inflight =/= 0.U
-      val matrix_unit_cycle_count = WideCounter(64, matrix_unit_running)
-
-      voyager_reg_map ++= Seq(
-        0x100 -> Seq(RegField.w(64, matrix_unit_params_in_q.io.enq)),
-        0x108 -> Seq(RegField.r(64, matrix_unit_cycle_count.value)),
-        0x110 -> Seq(RegField.r(2, matrix_op_inflight)),
-        0x118 -> Seq(RegField(1, mu_wait_en)),
-        0x120 -> Seq(RegField(8, mu_wait_id)),
-        0x128 -> Seq(RegField(1, mu_signal_en)),
-        0x130 -> Seq(RegField(8, mu_signal_id)),
-      )
+      connectUnit(0, "matrix_unit", matrix_unit_params_in_q, 0x100)
 
       // -------------------------------
       // Vector Unit
@@ -757,42 +782,7 @@ class TLVoyager(
       val sparse_output_addr_q, sparse_output_data_q     =
         connectOutput("sparse_tensor_output", ocPortWidth, sparse_tensor_output_interface)
 
-      val vu_wait_en   = RegInit(false.B)
-      val vu_wait_id   = RegInit(0.U(log2Ceil(numSemaphores).W))
-      val vu_signal_en = RegInit(false.B)
-      val vu_signal_id = RegInit(0.U(log2Ceil(numSemaphores).W))
-
-      io_map("vector_unit_start_rdy") := (vector_op_inflight === 0.U) && (!vu_wait_en || (semaphores(vu_wait_id) > 0.U))
-      io_map("vector_unit_done_rdy")  := 1.U
-
-      val vu_start_fire = bool("vector_unit_start_rdy") && bool("vector_unit_start_vld")
-      val vu_dec_sem    = vu_start_fire && vu_wait_en
-
-      when(vu_start_fire) {
-        assert(vector_op_inflight === 0.U, "Vector inflight overflow!")
-        vector_op_inflight := vector_op_inflight + 1.U
-      }
-
-      val vu_done_fire = bool("vector_unit_done_rdy") && bool("vector_unit_done_vld")
-      val vu_inc_sem   = vu_done_fire && vu_signal_en
-
-      when(vu_done_fire) {
-        assert(vector_op_inflight =/= 0.U, "Vector done with no inflight!")
-        vector_op_inflight := vector_op_inflight - 1.U
-      }
-
-      val vector_unit_running     = vector_op_inflight =/= 0.U
-      val vector_unit_cycle_count = WideCounter(64, vector_unit_running)
-
-      voyager_reg_map ++= Seq(
-        0x200 -> Seq(RegField.w(64, vector_unit_params_in_q.io.enq)),
-        0x208 -> Seq(RegField.r(64, vector_unit_cycle_count.value)),
-        0x210 -> Seq(RegField.r(2, vector_op_inflight)),
-        0x218 -> Seq(RegField(1, vu_wait_en)),
-        0x220 -> Seq(RegField(8, vu_wait_id)),
-        0x228 -> Seq(RegField(1, vu_signal_en)),
-        0x230 -> Seq(RegField(8, vu_signal_id)),
-      )
+      connectUnit(1, "vector_unit", vector_unit_params_in_q, 0x200)
 
       // -------------------------------
       // Matrix Vector Unit
@@ -822,47 +812,7 @@ class TLVoyager(
             connectInput("matrix_vector_unit_weight_scale", mvmScaleWidth, mvm_unit_weight_scale_interface)
         }
 
-        val mvm_wait_en_reg   = RegInit(false.B)
-        val mvm_wait_id_reg   = RegInit(0.U(log2Ceil(numSemaphores).W))
-        val mvm_signal_en_reg = RegInit(false.B)
-        val mvm_signal_id_reg = RegInit(0.U(log2Ceil(numSemaphores).W))
-
-        // Wire up the registers to the global visibility wires
-        mvm_wait_id   := mvm_wait_id_reg
-        mvm_signal_id := mvm_signal_id_reg
-
-        io_map("matrix_vector_unit_start_rdy") := !mvm_wait_en_reg || (semaphores(mvm_wait_id_reg) > 0.U)
-        io_map("matrix_vector_unit_done_rdy")  := 1.U
-
-        val mvm_start_fire = bool("matrix_vector_unit_start_rdy") && bool("matrix_vector_unit_start_vld")
-        mvm_dec_sem := mvm_start_fire && mvm_wait_en_reg
-
-        // Same start/done same-cycle bug as the matrix counter above.
-        when(mvm_start_fire) {
-          assert(matrix_vector_op_inflight =/= 2.U, "MatrixVector inflight overflow!")
-          matrix_vector_op_inflight := matrix_vector_op_inflight + 1.U
-        }
-
-        val mvm_done_fire = bool("matrix_vector_unit_done_rdy") && bool("matrix_vector_unit_done_vld")
-        mvm_inc_sem := mvm_done_fire && mvm_signal_en_reg
-
-        when(mvm_done_fire) {
-          assert(matrix_vector_op_inflight =/= 0.U, "MatrixVector done with no inflight!")
-          matrix_vector_op_inflight := matrix_vector_op_inflight - 1.U
-        }
-
-        val mvm_unit_running     = matrix_vector_op_inflight =/= 0.U
-        val mvm_unit_cycle_count = WideCounter(64, mvm_unit_running)
-
-        voyager_reg_map ++= Seq(
-          0x300 -> Seq(RegField.w(64, mvm_unit_params_in_q.io.enq)),
-          0x308 -> Seq(RegField.r(64, mvm_unit_cycle_count.value)),
-          0x310 -> Seq(RegField.r(2, matrix_vector_op_inflight)),
-          0x318 -> Seq(RegField(1, mvm_wait_en_reg)),
-          0x320 -> Seq(RegField(8, mvm_wait_id_reg)),
-          0x328 -> Seq(RegField(1, mvm_signal_en_reg)),
-          0x330 -> Seq(RegField(8, mvm_signal_id_reg)),
-        )
+        connectUnit(2, "matrix_vector_unit", mvm_unit_params_in_q, 0x300)
       }
 
       // -------------------------------
@@ -889,78 +839,15 @@ class TLVoyager(
             connectInput("spmm_unit_weight_scale", ocPortWidth, spmm_unit_weight_scale_interface)
         }
 
-        val spmm_wait_en_reg   = RegInit(false.B)
-        val spmm_wait_id_reg   = RegInit(0.U(log2Ceil(numSemaphores).W))
-        val spmm_signal_en_reg = RegInit(false.B)
-        val spmm_signal_id_reg = RegInit(0.U(log2Ceil(numSemaphores).W))
-
-        // Wire up the registers to the global visibility wires
-        spmm_wait_id   := spmm_wait_id_reg
-        spmm_signal_id := spmm_signal_id_reg
-
-        io_map("spmm_unit_start_rdy") := !spmm_wait_en_reg || (semaphores(spmm_wait_id_reg) > 0.U)
-        io_map("spmm_unit_done_rdy")  := 1.U
-
-        val spmm_start_fire = bool("spmm_unit_start_rdy") && bool("spmm_unit_start_vld")
-        spmm_dec_sem := spmm_start_fire && spmm_wait_en_reg
-
-        // Same start/done same-cycle bug as the matrix counter above.
-        when(spmm_start_fire) {
-          assert(spmm_op_inflight =/= 2.U, "SpMM inflight overflow!")
-          spmm_op_inflight := spmm_op_inflight + 1.U
-        }
-
-        val spmm_done_fire = bool("spmm_unit_done_rdy") && bool("spmm_unit_done_vld")
-        spmm_inc_sem := spmm_done_fire && spmm_signal_en_reg
-
-        when(spmm_done_fire) {
-          assert(spmm_op_inflight =/= 0.U, "SpMM done with no inflight!")
-          spmm_op_inflight := spmm_op_inflight - 1.U
-        }
-
-        val spmm_unit_running     = spmm_op_inflight =/= 0.U
-        val spmm_unit_cycle_count = WideCounter(64, spmm_unit_running)
-
-        voyager_reg_map ++= Seq(
-          0x400 -> Seq(RegField.w(64, spmm_unit_params_in_q.io.enq)),
-          0x408 -> Seq(RegField.r(64, spmm_unit_cycle_count.value)),
-          0x410 -> Seq(RegField.r(2, spmm_op_inflight)),
-          0x418 -> Seq(RegField(1, spmm_wait_en_reg)),
-          0x420 -> Seq(RegField(8, spmm_wait_id_reg)),
-          0x428 -> Seq(RegField(1, spmm_signal_en_reg)),
-          0x430 -> Seq(RegField(8, spmm_signal_id_reg)),
-        )
+        connectUnit(3, "spmm_unit", spmm_unit_params_in_q, 0x400)
       }
 
-      // Accelerator (either unit)
-      val accel_running           = matrix_op_inflight =/= 0.U ||
-        vector_op_inflight =/= 0.U ||
-        matrix_vector_op_inflight =/= 0.U ||
-        spmm_op_inflight =/= 0.U
+      // The accelerator is busy while any unit has a pass dispatched, queued
+      // behind a wait included (what ctr_drain polls); its cycle count runs
+      // while a pass is running.
+      val accel_busy              = syncs.map(_.io.inflight =/= 0.U).reduce(_ || _)
+      val accel_running           = syncs.map(_.io.running).reduce(_ || _)
       val accelerator_cycle_count = WideCounter(64, accel_running)
-
-      for (i <- 0 until numSemaphores) {
-        // Sum up all increments for semaphore 'i' in this cycle
-        val incs = Seq(
-          (mu_inc_sem && mu_signal_id === i.U),
-          (vu_inc_sem && vu_signal_id === i.U),
-          (mvm_inc_sem && mvm_signal_id === i.U),
-          (spmm_inc_sem && spmm_signal_id === i.U),
-          (dma_inc_sem && dma_signal_id === i.U),
-        ).map(_.asUInt).reduce(_ +& _)
-
-        // Sum up all decrements for semaphore 'i' in this cycle
-        val decs = Seq(
-          (mu_dec_sem && mu_wait_id === i.U),
-          (vu_dec_sem && vu_wait_id === i.U),
-          (mvm_dec_sem && mvm_wait_id === i.U),
-          (spmm_dec_sem && spmm_wait_id === i.U),
-          (dma_dec_sem && dma_wait_id === i.U),
-        ).map(_.asUInt).reduce(_ +& _)
-
-        // Update hardware counter
-        semaphores(i) := semaphores(i) + incs - decs
-      }
 
       // -------------------------------
       // Interrupts
@@ -971,13 +858,11 @@ class TLVoyager(
 
       val bank_0_loaded_prev = RegNext(bank_0_loaded)
       val bank_1_loaded_prev = RegNext(bank_1_loaded)
-      val accel_running_prev = RegNext(accel_running)
-      val semaphores_prev    = RegNext(semaphores)
+      val accel_busy_prev    = RegNext(accel_busy)
 
       val int_set_signals = Cat(
-        semaphores.zip(semaphores_prev).map { case (curr, prev) => curr =/= prev }.asUInt, // bits 15-8
-        0.U(5.W),                             // bits 7-3 (unused)
-        !accel_running && accel_running_prev, // bit 2
+        0.U(13.W),                            // bits 15-3 (unused)
+        !accel_busy && accel_busy_prev,       // bit 2
         bank_1_loaded && !bank_1_loaded_prev, // bit 1
         bank_0_loaded && !bank_0_loaded_prev, // bit 0
       )
@@ -988,7 +873,7 @@ class TLVoyager(
       voyager_reg_map ++= Seq(
         0x000 -> Seq(RegField(64, voyager_base_addr)),
         0x008 -> Seq(RegField.r(64, accelerator_cycle_count.value)),
-        0x010 -> Seq(RegField.r(1, accel_running)),
+        0x010 -> Seq(RegField.r(1, accel_busy)),
         0x01a -> Seq(RegField(8, bank_0_loaded)),
         0x01b -> Seq(RegField(8, bank_1_loaded)),
         0x020 -> Seq(RegField.w1ToClear(16, int_status, int_set_signals)),

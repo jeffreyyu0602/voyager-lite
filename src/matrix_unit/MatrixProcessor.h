@@ -98,8 +98,6 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       weight_scale_channel);
 #endif
 
-  Connections::SyncOut CCS_INIT_S1(start);
-
   SC_CTOR(MatrixProcessor) {
     input_skewer.clk(clk);
     input_skewer.rstn(rstn);
@@ -288,7 +286,6 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
     process_accumulation_params_enq.ResetWrite();
     write_back_params_enq.ResetWrite();
     input_skewer_din.ResetWrite();
-    start.Reset();
 
     wait();
 
@@ -297,8 +294,6 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       push_weights_params.Push(params);
       process_accumulation_params_enq.Push(params);
       write_back_params_enq.Push(params);
-
-      start.SyncPush();
 
       ac_int<LOOP_WIDTH, false> loop_counters[2][6];
 

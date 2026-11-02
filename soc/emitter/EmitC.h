@@ -13,16 +13,19 @@
 
 // Emits one layer's bufferized program as C for the control processor.
 //
-// The generated firmware executes the whole program: loops, scalar
+// The generated firmware executes the whole program op for op: loops, scalar
 // arithmetic, conditionals, dispatches, the index-cell bookkeeping, and the
-// program's semaphores as counters it owns. The DRAM<->scratchpad transfers
-// it cannot perform itself (Sphinx has no DMA engine) become requests to the
-// SoC testbench (host_request.h): a voyager::async_copy or zero fill names
-// its prim by ordinal in the host-request table and ships the run-time
-// values of the scalars the prim references; a commit's retire post asks
-// the testbench to credit the semaphore once the units have retired. Built
-// with NO_TESTBENCH (full JTAG mode, the chip) those requests and the waits
-// on them compile to nothing, as the image is preloaded.
+// program's synchronization on the accelerator's hardware counters
+// (run_voyager_operation.h): a commit's waits and post are attached to its
+// passes with sync_wait / sync_post, a CPU wait is ctr_wait, a counter
+// declaration is ctr_reset. The DRAM<->scratchpad
+// transfers the firmware cannot perform itself (Sphinx has no DMA engine)
+// become requests to the SoC testbench (host_request.h): a voyager::async_copy
+// or zero fill names its prim by ordinal in the host-request table and ships
+// the run-time values of the scalars the prim references; the testbench adds
+// 1 to the copy's counter once the transfer has landed. Built with
+// NO_TESTBENCH (full JTAG mode, the chip) the image is preloaded and
+// host_copy adds the 1 itself; the emitted C is the same.
 //
 // A dispatch's params are serialized once at generation time with the
 // iteration-0 scalar environment and embedded as static byte arrays. Fields
@@ -34,8 +37,10 @@ class CEmitter {
  public:
   explicit CEmitter(const Model& model) : model_(model) {}
 
-  // Emits one layer. Returns the complete C translation unit.
-  std::string emit_layer(const Model::Selection& selection);
+  // Emits one layer. Returns the complete C translation unit; `layer` names
+  // it in diagnostics.
+  std::string emit_layer(const Model::Selection& selection,
+                         const std::string& layer);
 
  private:
   // --- symbol table: SSA name -> C identifier, scoped like ScalarEnv ---
@@ -85,20 +90,16 @@ class CEmitter {
                  int indent);
   void emit_dispatch(const voyager::Operation& op, int indent);
 
-  // --- the program's semaphores and its requests to the testbench ---
-  // A semaphore node is two arrays of counters in the firmware, one per
-  // slot: `_tb`, which the testbench increments (a copy's completion, a
-  // commit's retirement), and `_fw`, the firmware's own posts minus its
-  // consumptions. Declared on first use; returns the two C names.
-  std::pair<std::string, std::string> sem_cells(const voyager::TensorBox& box);
-  // The slot a semaphore ref selects, as a C expression (resolve_bank).
-  std::string sem_slot_expr(const voyager::TensorBoxRef& ref,
-                            const std::string& who) const;
-  void emit_semaphore_zeros(const voyager::Operation& op, int indent);
-  void emit_semaphore_fill(const voyager::Operation& op,
-                           const voyager::PrimOp& prim, int indent);
+  // --- the program's counters and its requests to the testbench ---
+  // GraphUtils' counter_id, with `who` naming the op in the error.
+  int64_t counter_id(const voyager::TensorBox& box,
+                     const std::string& who) const;
+  // voyager::zeros of a counter: ctr_reset(id).
+  void emit_counter_reset(const voyager::Operation& op, int indent);
+  // voyager::async_wait: the CPU spins until counter >= threshold.
   void emit_async_wait(const voyager::Operation& op,
                        const voyager::PrimOp& prim, int indent);
+  // A commit: its body's one dispatch carries the waits and the post.
   void emit_async(const voyager::Operation& op, int indent);
   // A prim in the host-request table: a copy, a zero fill or a host tensor
   // op, issued to the testbench by ordinal.
@@ -107,8 +108,8 @@ class CEmitter {
                          int indent);
 
   bool contains_dispatch(const voyager::Operation& op) const;
-  // Anything the firmware emits code for: a dispatch, a request, a
-  // semaphore operation, bookkeeping. A loop with none is not emitted.
+  // Anything the firmware emits code for: a dispatch, a request, a counter
+  // operation, bookkeeping. A loop with none is not emitted.
   bool contains_work(const voyager::Operation& op) const;
   bool cond_guards_dispatch(const voyager::Operation& op) const;
 
@@ -127,17 +128,16 @@ class CEmitter {
   void line(int indent, const std::string& text);
 
   const Model& model_;
+  std::string layer_;
   ScalarEnv env_;
   std::vector<std::map<std::string, std::string>> scopes_;
   std::map<std::string, int> name_counts_;
-  std::ostringstream decls_;  // file-scope statics: params arrays, semaphores
+  std::ostringstream decls_;  // file-scope statics: the params arrays
   std::ostringstream body_;   // statements inside main()
 
   // The layer's host-request table (HostRequests.h) and each prim's ordinal.
   std::vector<HostOp> host_table_;
   std::map<const voyager::PrimOp*, size_t> host_ordinals_;
-  // Semaphore node -> C name stem of its counter arrays.
-  std::map<std::string, std::string> sem_names_;
   const std::set<const voyager::Operation*>* bounded_ = nullptr;
   int loop_depth_ = 0;
   int max_tiles_ = 0;
@@ -172,8 +172,7 @@ class CEmitter {
   // hardware will run -- so it is mapped and probed under this instead.
   std::map<const voyager::Operation*, ScalarEnv> concrete_env_;
 
-  // Inside a commit region's body: its dispatches are asynchronous. A
-  // dispatch emitted outside any commit is synchronous and gets
-  // Harness::execute's drain-dispatch-drain brackets (Harness.cc:688-690).
-  bool in_commit_ = false;
+  // The commit whose waits and post the next dispatch emitted must carry;
+  // null outside a commit body and once the dispatch has taken them.
+  const voyager::Operation* pending_commit_ = nullptr;
 };

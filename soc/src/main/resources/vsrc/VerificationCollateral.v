@@ -9,7 +9,9 @@
 `define MATRIX_VECTOR_UNIT_DONE_VLD  `VOYAGER(__accelerator_matrix_vector_unit_done_vld)
 `define SPMM_UNIT_START_VLD          `VOYAGER(__accelerator_spmm_unit_start_vld)
 `define SPMM_UNIT_DONE_VLD           `VOYAGER(__accelerator_spmm_unit_done_vld)
-`define HOST_DOORBELL                `VOYAGER(_semaphores_7)
+`define HOST_DOORBELL                `VOYAGER(_doorbell)
+`define COUNTER_ADD_VLD              `VOYAGER(_counter_add_port.vld)
+`define COUNTER_ADD_ID               `VOYAGER(_counter_add_port.id)
 `else
 `define VOYAGER TestDriver.testHarness.chiptop0.system.voyager
 `define MATRIX_UNIT_START_VLD        `VOYAGER.accelerator.matrix_unit.start_vld
@@ -20,9 +22,13 @@
 `define MATRIX_VECTOR_UNIT_DONE_VLD  `VOYAGER.accelerator.matrix_vector_unit.done_vld
 `define SPMM_UNIT_START_VLD          `VOYAGER.accelerator.spmm_unit.start_vld
 `define SPMM_UNIT_DONE_VLD           `VOYAGER.accelerator.spmm_unit.done_vld
-// Hardware semaphore 7: the firmware posts one credit per request it writes
-// into its mailbox (host_request.h).
-`define HOST_DOORBELL                `VOYAGER.semaphores_7
+// The wrapper's doorbell count: the firmware advances it once per request it
+// writes into its mailbox (host_request.h).
+`define HOST_DOORBELL                `VOYAGER.doorbell
+// The wrapper's DMA completion port (CounterAddPort.v): the testbench adds 1
+// to a synchronization counter through it when a copy has landed.
+`define COUNTER_ADD_VLD              `VOYAGER.counter_add_port.vld
+`define COUNTER_ADD_ID               `VOYAGER.counter_add_port.id
 `endif
 
 import "DPI-C" context function void load_memory();
@@ -59,7 +65,16 @@ module VoyagerVerification (
 `ifdef SUPPORT_SPMM
     logic spmm_unit_start_vld_q;
 `endif
-    logic [7:0] doorbell_q;
+    logic [31:0] doorbell_q;
+
+    // Counter adds the testbench has requested (counter_add, called from its
+    // DPI context) and not yet driven: the port takes one per cycle.
+    int counter_adds[$];
+
+    export "DPI-C" function counter_add;
+    function void counter_add(input int counter);
+        counter_adds.push_back(counter);
+    endfunction
 
     initial begin
         @(posedge clock);  // move past time 0 to avoid signal glitch
@@ -119,7 +134,9 @@ module VoyagerVerification (
 `ifdef SUPPORT_SPMM
             spmm_unit_start_vld_q <= 1'b0;
 `endif
-            doorbell_q <= 8'd0;
+            doorbell_q <= 32'd0;
+            `COUNTER_ADD_VLD <= 1'b0;
+            `COUNTER_ADD_ID <= 5'd0;
         end else begin
             matrix_unit_start_vld_q <= `MATRIX_UNIT_START_VLD;
             vector_unit_start_vld_q <= `VECTOR_UNIT_START_VLD;
@@ -161,6 +178,15 @@ module VoyagerVerification (
                         host_doorbell();
                     end
                 join_none
+            end
+
+            // One counter add per cycle; the wrapper samples the port on the
+            // next edge.
+            if (counter_adds.size() > 0) begin
+                `COUNTER_ADD_VLD <= 1'b1;
+                `COUNTER_ADD_ID <= counter_adds.pop_front();
+            end else begin
+                `COUNTER_ADD_VLD <= 1'b0;
             end
         end
     end

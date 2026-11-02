@@ -489,7 +489,31 @@ void run_host_operation(const voyager::Operation& operation,
     if (strip_namespace(prim.target()) == "add") {
       const int64_t alpha =
           has_arg(prim, "alpha") ? arg_int(prim, "alpha", env) : 1;
-      const int64_t addend = alpha * arg_int(prim, "other", env);
+      // `other` is a scalar, or a one-element on-chip tensor (a value
+      // computed at run time) the CPU reads.
+      int64_t other = 0;
+      if (prim.kwargs().at("other").has_tensor_box()) {
+        const Tensor cell = resolve(prim, "other", env);
+        if (get_size(cell) != 1) {
+          throw std::runtime_error(operation.name() +
+                                   ": other is not one element.");
+        }
+        std::any value = memory->read_tensor(cell);
+        if (auto* v =
+                std::any_cast<std::shared_ptr<DataTypes::int32[]>>(&value)) {
+          other = (*v)[0].int_val.to_int64();
+        } else if (auto* v =
+                       std::any_cast<std::shared_ptr<DataTypes::int64[]>>(
+                           &value)) {
+          other = (*v)[0].int_val.to_int64();
+        } else {
+          throw std::runtime_error(operation.name() +
+                                   ": other is not an index dtype.");
+        }
+      } else {
+        other = arg_int(prim, "other", env);
+      }
+      const int64_t addend = alpha * other;
       if (auto* values =
               std::any_cast<std::shared_ptr<DataTypes::int32[]>>(&data)) {
         for (int i = 0; i < get_size(src); i++) {

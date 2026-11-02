@@ -19,13 +19,15 @@ P8_1_FLAGS := --activation posit8_1 --weight posit8_1 --bf16 --bank_width $(BYTE
 INT8_FLAGS := --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_tensor_symmetric --bias int24 --bf16 --calibration_steps 3 --bank_width $(BYTE_BANK_WIDTH)
 INT8_32_FLAGS := --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_tensor_symmetric --bias int32 --bf16 --calibration_steps 3 --bank_width $(BYTE_BANK_WIDTH)
 BLOCK_SIZE := $(shell [ $(IC_DIMENSION) -gt $(OC_DIMENSION) ] && echo $(IC_DIMENSION) || echo $(OC_DIMENSION))
-MXINT8_FLAGS := --activation int8,qs=microscaling,bs=$(BLOCK_SIZE) --weight int8,qs=microscaling,bs=$(BLOCK_SIZE) --force_scale_power_of_two --bf16 --bank_width $(BYTE_BANK_WIDTH)
-MXNF4_FLAGS := --activation nf4_6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --weight nf4_6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --bf16 --residual fp8_e4m3 --quantize_fc --bank_width $(NIBBLE_BANK_WIDTH)
-COMMON_FLAGS := --layout_policy systolic --pe_array_size $(IC_DIMENSION),$(OC_DIMENSION) --dump_tensors --double_buffered_l2 --scratchpad_size $(SCRATCHPAD_SIZE) --scratchpad_offset $(SCRATCHPAD_OFFSET) --num_banks $(NUM_BANKS) --input_buffer_size $(INPUT_BUFFER_SIZE) --weight_buffer_size $(WEIGHT_BUFFER_SIZE) --accum_buffer_size $(ACCUM_BUFFER_SIZE)
+MXINT8_FLAGS := --activation int8,qs=microscaling,bs=$(BLOCK_SIZE),pot=1 --weight int8,qs=microscaling,bs=$(BLOCK_SIZE),pot=1 --bf16 --bank_width $(BYTE_BANK_WIDTH)
+MXNF4_FLAGS := --activation lut4_to_int6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --weight lut4_to_int6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --bf16 --residual fp8_e4m3 --quantize_fc --bank_width $(NIBBLE_BANK_WIDTH)
+COMMON_FLAGS := --tensor_layout nhwc --gemm_layout "xc,ck->xk" --pe_array_size $(IC_DIMENSION),$(OC_DIMENSION) --dump_tensors --double_buffered_l2 --scratchpad_size $(SCRATCHPAD_SIZE) --scratchpad_offset $(SCRATCHPAD_OFFSET) --num_banks $(NUM_BANKS) --input_buffer_size $(INPUT_BUFFER_SIZE) --weight_buffer_size $(WEIGHT_BUFFER_SIZE) --accum_buffer_size $(ACCUM_BUFFER_SIZE)
 EXTRA_COMPILER_FLAGS ?=
 
 CONTEXT ?= 1024
-LLM_FLAGS := --context_length $(CONTEXT) --num_hidden_layers 1 --quantize_attention_mask
+LLM_FLAGS := --context_length $(CONTEXT) --num_hidden_layers 1 --remove_fp32_casts
+# Only MXNF4's vector unit reads an int1 mask; MXINT8 keeps it bf16.
+LLM_MXNF4_FLAGS := --quantize_attention_mask --bool_mask
 
 ifneq ($(filter true 1,$(DOUBLE_BUFFERED_ACCUM_BUFFER)),)
 COMMON_FLAGS += --double_buffered_accum_buffer
@@ -45,7 +47,7 @@ endif
 #
 # One rule compiles any network. NETWORK names the output folder; these pick
 # what is compiled into it:
-#   MODE         test_codegen.py's model, e.g. llama_prefill (default: NETWORK)
+#   MODE         compile_model.py's model, e.g. llama_prefill (default: NETWORK)
 #   CHECKPOINT   --model_name_or_path (default: the compiler's own)
 #   QCONFIG      --qconfig (default: none)
 #   SPEC_LENGTH  draft tokens of a llama_verify step (default: 14)
@@ -57,11 +59,15 @@ MODE ?= $(NETWORK)
 CHECKPOINT ?=
 QCONFIG ?=
 SPEC_LENGTH ?= 14
+# A KIVI cache's full-precision residual chunk (the compiler requires it).
+RESIDUAL_LENGTH ?= 128
 
 NETWORK_FLAGS := \
 	$(if $(filter llama_%,$(MODE)),$(LLM_FLAGS)) \
+	$(if $(and $(filter llama_%,$(MODE)),$(filter MXNF4,$(DATATYPE))),$(LLM_MXNF4_FLAGS)) \
 	$(if $(CHECKPOINT),--model_name_or_path $(CHECKPOINT)) \
 	$(if $(QCONFIG),--qconfig $(QCONFIG)) \
+	$(if $(filter %_kivi,$(MODE)),--residual_length $(RESIDUAL_LENGTH)) \
 	$(if $(filter llama_verify,$(MODE)),--spec_length $(SPEC_LENGTH))
 
 # A folder remembers what it was compiled as, so a NETWORK name reused with
@@ -76,7 +82,7 @@ endif
 
 $(CODEGEN_DIR)/networks/%/model.txt:
 	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py $(MODE) $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) $(NETWORK_FLAGS) > $(dir $@)codegen.log 2>&1
+	python voyager-compiler/scripts/compile_model.py $(MODE) $($(notdir $(patsubst %/,%,$(dir $@)))_FLAGS) $(EXTRA_COMPILER_FLAGS) --model_output_dir $(dir $@) $(COMMON_FLAGS) $(NETWORK_FLAGS) > $(dir $@)codegen.log 2>&1
 	echo '$(NETWORK_ARGS)' > $(dir $@)network_args.txt
 
 ################################################################################
@@ -84,4 +90,4 @@ $(CODEGEN_DIR)/networks/%/model.txt:
 ################################################################################
 build/codegen/networks/layertest/CFLOAT/model.txt:
 	mkdir -p $(dir $@)
-	python voyager-compiler/test/test_codegen.py layertest --model_output_dir $(dir $@) > $(dir $@)/codegen.log 2>&1
+	python voyager-compiler/scripts/compile_model.py layertest --model_output_dir $(dir $@) > $(dir $@)/codegen.log 2>&1

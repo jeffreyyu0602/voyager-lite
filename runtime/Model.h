@@ -26,13 +26,11 @@ class Model {
   const voyager::TensorBox& box(const std::string& node) const;
 
   // What a TESTS selection runs: the layer extent named by TESTS -- every
-  // top-level op the layer's bufferized nest emitted -- or every op when
-  // unset, plus the ops MAX_TILES bounds.
-  //
-  // Both halves come out of one walk, because they are the same decision:
-  // the walk stops at the loop the bound cuts short, since the ops after it
-  // are a drain specialized for the complete loop. Splitting that decision
-  // in two lets the walk and the bound disagree about which loop that is.
+  // top-level op the layer's bufferized nest emitted, its epilogue included
+  // -- or every op when unset, plus the ops MAX_TILES bounds (every selected
+  // op; the bound acts only on an outermost loop). A cut that ends a tile
+  // loop mid-tile drops the epilogue's stores of that unfinished tile and
+  // the waits only they need.
   struct Selection {
     std::vector<const voyager::Operation*> ops;
     std::set<const voyager::Operation*> bounded;
@@ -54,9 +52,6 @@ class Model {
                  std::vector<const voyager::TensorBox*>* live_in,
                  std::vector<const voyager::TensorBox*>* live_out,
                  bool include_scratchpad = false) const;
-
-  // Every REGISTER-level box: the DMA semaphores.
-  std::vector<std::string> semaphore_nodes() const;
 
   void print_summary() const;
 

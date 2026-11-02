@@ -93,7 +93,7 @@ common/traps.o: common/traps.c common/traps.h $(CFLAGS_STAMP)
 common/patch_bits.o: common/patch_bits.c common/patch_bits.h $(CFLAGS_STAMP)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-common/host_request.o: common/host_request.c common/host_request.h common/run_voyager_operation.h common/voyager_address.h $(CFLAGS_STAMP)
+common/host_request.o: common/host_request.c common/host_request.h common/voyager_address.h $(CFLAGS_STAMP)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 common/semihost_write.o: common/semihost_write.c $(CFLAGS_STAMP)

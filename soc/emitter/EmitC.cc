@@ -59,6 +59,34 @@ struct SerializedParam {
   std::vector<unsigned char> bytes;
 };
 
+// The accelerator's units, as the firmware names them
+// (run_voyager_operation.h); the enumerators are the unit codes.
+enum Unit { kUnitMatrix = 0, kUnitVector = 1, kUnitMvm = 2, kUnitSpmm = 3 };
+const char* const kUnitName[] = {"UNIT_MATRIX", "UNIT_VECTOR", "UNIT_MVM",
+                                 "UNIT_SPMM"};
+
+// The counter that orders consecutive passes of one op on one unit; the
+// compiler never assigns it (memory_planning.py INTRA_OP_COUNTER). The C
+// variable counts the posts issued on it so far.
+constexpr int64_t kIntraOpCounter = NUM_COUNTERS - 1;
+const char* const kIntraOpPosts = "vy_intra_posts";
+
+// Waits one pass may carry: the depth of a unit's wait queue.
+constexpr int kWaitsPerPass = 16;
+
+// Where a MatrixParams goes, mirroring Harness::dispatch_params: an is_fc one
+// to the matrix-vector unit and an is_spmm one to the SpMM unit, each only
+// when the build has that unit, else the plain matrix unit.
+Unit matrix_class_unit(const SerializedParam& param) {
+#if SUPPORT_MVM
+  if (param.is_fc) return kUnitMvm;
+#endif
+#if SUPPORT_SPMM
+  if (param.is_spmm) return kUnitSpmm;
+#endif
+  return kUnitMatrix;
+}
+
 std::vector<SerializedParam> serialize_params(
     const std::deque<BaseParams*>& params) {
   std::vector<SerializedParam> out;
@@ -372,8 +400,7 @@ bool CEmitter::contains_work(const voyager::Operation& op) const {
       const auto& prim = op.prim();
       const std::string& target = prim.target();
       if (host_ordinals_.count(&prim) > 0) return true;
-      if (target == "voyager::zeros" || target == "voyager::fill" ||
-          target == "voyager::async_wait") {
+      if (target == "voyager::zeros" || target == "voyager::async_wait") {
         return true;
       }
       return is_host_bookkeeping(prim) || is_datapath(op);
@@ -403,9 +430,7 @@ bool CEmitter::contains_work(const voyager::Operation& op) const {
       }
       return false;
     case voyager::Operation::kAsync:
-      if (op.async().dependencies_size() > 0 || op.async().has_post()) {
-        return true;
-      }
+      if (op.async().waits_size() > 0 || op.async().has_post()) return true;
       for (const auto& child : op.async().body().ops()) {
         if (contains_work(child)) return true;
       }
@@ -509,16 +534,13 @@ void CEmitter::emit_operation(const voyager::Operation& op, int indent) {
         emit_host_request(op, prim, host->second, indent);
         return;
       }
-      // Address assignment is the compiler's; a float allocation's contents
-      // are junk nothing reads before writing (the integer ones are zero
-      // fills, in the table above).
+      // Address assignment is the compiler's: an alloc declares storage (a
+      // buffer, or a counter at the register level) and writes nothing; the
+      // integer buffers' zero fills are in the table above.
       if (target == "voyager::alloc") return;
+      // A zeros that is not a zero fill in the table resets a counter.
       if (target == "voyager::zeros") {
-        emit_semaphore_zeros(op, indent);
-        return;
-      }
-      if (target == "voyager::fill") {
-        emit_semaphore_fill(op, prim, indent);
+        emit_counter_reset(op, indent);
         return;
       }
       if (target == "voyager::async_wait") {
@@ -529,6 +551,10 @@ void CEmitter::emit_operation(const voyager::Operation& op, int indent) {
           target == "voyager::increment_indices") {
         emit_delinearize(op, prim, indent);
         return;
+      }
+      if (target.rfind("voyager::", 0) == 0) {
+        throw std::runtime_error(target + " " + op.name() + " in " + layer_ +
+                                 ": the SoC emitter has no translation.");
       }
       bool only_scalars = op.outputs_size() > 0;
       for (const auto& output : op.outputs()) {
@@ -572,121 +598,63 @@ void CEmitter::emit_operation(const voyager::Operation& op, int indent) {
 }
 
 // ---------------------------------------------------------------------------
-// Semaphores and requests
+// Counters and requests
 // ---------------------------------------------------------------------------
 
-std::pair<std::string, std::string> CEmitter::sem_cells(
-    const voyager::TensorBox& box) {
-  auto it = sem_names_.find(box.node());
-  if (it == sem_names_.end()) {
-    std::string stem = "__sem_" + sanitize(box.node());
-    int& count = name_counts_[stem];
-    if (count > 0) stem += "_x" + std::to_string(count);
-    count++;
-    const int64_t slots = semaphore_slots(box);
-    // Cache-line apart from anything the firmware writes: the testbench's
-    // increments are read-modify-writes of a whole macro row.
-    decls_ << "static volatile int64_t " << stem << "_tb[" << slots
-           << "] __attribute__((aligned(64)));\n";
-    decls_ << "static int64_t " << stem << "_fw[" << slots << "];\n\n";
-    it = sem_names_.emplace(box.node(), stem).first;
+int64_t CEmitter::counter_id(const voyager::TensorBox& box,
+                             const std::string& who) const {
+  try {
+    return ::counter_id(box);
+  } catch (const std::exception& error) {
+    throw std::runtime_error(who + ": " + error.what());
   }
-  return {it->second + "_tb", it->second + "_fw"};
 }
 
-std::string CEmitter::sem_slot_expr(const voyager::TensorBoxRef& ref,
-                                    const std::string& who) const {
-  const voyager::TensorBox& box = ref.box();
-  const int dims = box.shape_size();
-  const bool banked = banks_of(box) > 1;
-  if (dims == 0 || ref.offsets_size() == 0) {
-    // select_bank: a scalar semaphore has one slot per bank.
-    if (ref.offsets_size() == 0 || !banked) return "0LL";
-    return "(" + scalar_expr(ref.offsets(0)) + ")";
+void CEmitter::emit_counter_reset(const voyager::Operation& op, int indent) {
+  const voyager::TensorBox* box = zeros_target(op);
+  if (box == nullptr) {
+    throw std::runtime_error("voyager::zeros " + op.name() + " names no box.");
   }
-  // A semaphore array: [bank, *dims] flattened bank-major.
-  const int bank_dims = banked ? 1 : 0;
-  if (ref.offsets_size() != dims + bank_dims) {
-    throw std::runtime_error(who + ": semaphore ref rank does not match " +
-                             box.node());
-  }
-  std::string index = "0LL";
-  int64_t elements = 1;
-  for (int d = 0; d < dims; d++) {
-    index = "(" + index + ") * " + std::to_string(box.shape(d)) + "LL + (" +
-            scalar_expr(ref.offsets(d + bank_dims)) + ")";
-    elements *= box.shape(d);
-  }
-  const std::string bank =
-      banked ? "(" + scalar_expr(ref.offsets(0)) + ")" : "0LL";
-  return bank + " * " + std::to_string(elements) + "LL + (" + index + ")";
-}
-
-void CEmitter::emit_semaphore_zeros(const voyager::Operation& op, int indent) {
-  if (op.outputs_size() != 1 || !op.outputs(0).has_tensor_box() ||
-      !is_semaphore(op.outputs(0).tensor_box())) {
-    throw std::runtime_error("voyager::zeros " + op.name() +
-                             " declares neither a buffer nor a semaphore.");
-  }
-  const auto& box = op.outputs(0).tensor_box();
-  const auto [tb, fw] = sem_cells(box);
-  const std::string slots = std::to_string(semaphore_slots(box)) + "LL";
-  line(indent, "/* " + op.name() + ": semaphore " + box.node() + " */");
-  line(indent, "for (int64_t __s = 0; __s < " + slots + "; __s++) {");
-  line(indent + 1, tb + "[__s] = 0;");
-  line(indent + 1, fw + "[__s] = 0;");
-  line(indent, "}");
-}
-
-void CEmitter::emit_semaphore_fill(const voyager::Operation& op,
-                                   const voyager::PrimOp& prim, int indent) {
-  if (op.outputs_size() != 1 || !op.outputs(0).has_tensor_box() ||
-      !is_semaphore(op.outputs(0).tensor_box())) {
-    throw std::runtime_error("voyager::fill " + op.name() +
-                             " targets a buffer that is not a semaphore.");
-  }
-  const auto& box = op.outputs(0).tensor_box();
-  const auto [tb, fw] = sem_cells(box);
-  const std::string value = scalar_expr(prim.kwargs().at("value").scalar());
-  const std::string slots = std::to_string(semaphore_slots(box)) + "LL";
-  // A fill seeds credits: it adds to every slot rather than setting it.
-  line(indent, "/* " + op.name() + ": seed semaphore " + box.node() + " */");
-  line(indent, "for (int64_t __s = 0; __s < " + slots + "; __s++) {");
-  line(indent + 1, fw + "[__s] += (" + value + ");");
-  line(indent, "}");
+  const int64_t id = counter_id(*box, "voyager::zeros " + op.name());
+  line(indent, "ctr_reset(" + std::to_string(id) + "); /* " + op.name() + ": " +
+                   box->node() + " */");
 }
 
 void CEmitter::emit_async_wait(const voyager::Operation& op,
                                const voyager::PrimOp& prim, int indent) {
-  const auto& ref = prim.kwargs().at("semaphore").tensor_box();
-  const auto [tb, fw] = sem_cells(ref.box());
-  const std::string slot = sem_slot_expr(ref, "async_wait " + op.name());
-  line(indent, "host_wait(&" + tb + "[" + slot + "], &" + fw + "[" + slot +
-                   "]); /* " + op.name() + " */");
+  const std::string who = "async_wait " + op.name();
+  const auto counter = prim.kwargs().find("counter");
+  const auto threshold = prim.kwargs().find("threshold");
+  if (counter == prim.kwargs().end() || !counter->second.has_tensor_box() ||
+      threshold == prim.kwargs().end() || !threshold->second.has_scalar()) {
+    throw std::runtime_error(who + ": expected a counter and a threshold.");
+  }
+  const int64_t id = counter_id(counter->second.tensor_box().box(), who);
+  line(indent, "ctr_wait(" + std::to_string(id) + ", " +
+                   scalar_expr(threshold->second.scalar()) + "); /* " +
+                   op.name() + " */");
 }
 
 void CEmitter::emit_async(const voyager::Operation& op, int indent) {
-  // A commit: wait every dependency, run the body's dispatches without
-  // draining, and have the testbench credit the post once the units have
-  // retired everything issued so far.
-  const auto& async = op.async();
-  for (const auto& dep : async.dependencies()) {
-    const auto [tb, fw] = sem_cells(dep.box());
-    const std::string slot = sem_slot_expr(dep, "commit " + op.name());
-    line(indent, "host_wait(&" + tb + "[" + slot + "], &" + fw + "[" + slot +
-                     "]); /* " + op.name() + " depends on " + dep.box().node() +
-                     " */");
+  // A commit is one dispatch; the dispatch attaches the commit's waits and
+  // post to its passes as it sends them (emit_dispatch).
+  if (pending_commit_ != nullptr) {
+    throw std::runtime_error("commit " + op.name() + " in " + layer_ +
+                             " is nested inside commit " +
+                             pending_commit_->name() + ".");
   }
-  const bool was_in_commit = in_commit_;
-  in_commit_ = true;
-  emit_ops(async.body().ops(), indent);
-  in_commit_ = was_in_commit;
-  if (async.has_post()) {
-    const auto [tb, fw] = sem_cells(async.post().box());
-    const std::string slot = sem_slot_expr(async.post(), "commit " + op.name());
-    line(indent, "host_post(&" + tb + "[" + slot + "], 1LL); /* " + op.name() +
-                     " retires */");
+  int dispatches = 0;
+  for (const auto& child : op.async().body().ops()) {
+    if (contains_dispatch(child)) dispatches++;
   }
+  if (dispatches != 1) {
+    throw std::runtime_error("commit " + op.name() + " in " + layer_ +
+                             " holds " + std::to_string(dispatches) +
+                             " dispatches; a commit is one dispatch.");
+  }
+  pending_commit_ = &op;
+  emit_ops(op.async().body().ops(), indent);
+  pending_commit_ = nullptr;
 }
 
 void CEmitter::emit_host_request(const voyager::Operation& op,
@@ -723,22 +691,16 @@ void CEmitter::emit_host_request(const voyager::Operation& op,
   const std::string count = std::to_string(names.size());
 
   if (host.kind == HostOp::kCopy) {
-    // The copy's completion credits its slot semaphore post_count times.
-    std::string cell = "(volatile int64_t *)0";
-    const auto sem = prim.kwargs().find("semaphore");
-    if (sem != prim.kwargs().end()) {
-      const auto& ref = sem->second.tensor_box();
-      const auto [tb, fw] = sem_cells(ref.box());
-      cell =
-          "&" + tb + "[" + sem_slot_expr(ref, "async_copy " + op.name()) + "]";
+    // The testbench adds 1 to the copy's counter once the transfer has landed.
+    const std::string who = "async_copy " + op.name();
+    const auto counter = prim.kwargs().find("counter");
+    if (counter == prim.kwargs().end() || !counter->second.has_tensor_box()) {
+      throw std::runtime_error(who + " carries no counter.");
     }
-    std::string amount = "1LL";
-    const auto post_count = prim.kwargs().find("post_count");
-    if (post_count != prim.kwargs().end()) {
-      amount = scalar_expr(post_count->second.scalar());
-    }
-    line(indent, "host_copy(" + slot + ", " + ord + ", " + count + ", " + cell +
-                     ", " + amount + "); /* " + op.name() + " */");
+    const int64_t id = counter_id(counter->second.tensor_box().box(), who);
+    line(indent, "host_copy(" + slot + ", " + ord + ", " + count + ", " +
+                     std::to_string(id) + "ULL); /* " + op.name() + ": " +
+                     counter->second.tensor_box().box().node() + " */");
   } else {
     line(indent, "host_op(" + slot + ", " + ord + ", " + count + "); /* " +
                      op.name() + ": " + strip_namespace(prim.target()) + " */");
@@ -952,7 +914,20 @@ void CEmitter::emit_host_bookkeeping(const voyager::Operation& op,
   if (target == "clone") {
     rhs = s + "[__i]";
   } else if (target == "add") {
-    const std::string other = scalar_expr(prim.kwargs().at("other").scalar());
+    // `other` is a scalar, or a one-element on-chip tensor (a value computed
+    // at run time, which the compiler loaded) that the CPU reads.
+    const auto& other_arg = prim.kwargs().at("other");
+    std::string other;
+    if (other_arg.has_tensor_box()) {
+      const CellWindow cell = cell_window(other_arg.tensor_box(), who);
+      if (cell.count != 1) {
+        throw std::runtime_error(who + ": other is not one element.");
+      }
+      other = "(*(volatile " + cell.c_type + " *)(uintptr_t)(SRAM_BASE + " +
+              std::to_string(cell.base) + "LL" + cell.runtime_terms + "))";
+    } else {
+      other = scalar_expr(other_arg.scalar());
+    }
     std::string alpha = "1LL";
     const auto a = prim.kwargs().find("alpha");
     if (a != prim.kwargs().end()) alpha = scalar_expr(a->second.scalar());
@@ -961,10 +936,10 @@ void CEmitter::emit_host_bookkeeping(const voyager::Operation& op,
     throw std::runtime_error(who + ": unsupported host op " + target);
   }
 
-  // In place, after the dispatch whose results it reads has retired.
+  // In place; the program's drain before it has retired the dispatch whose
+  // results it reads.
   line(indent, "/* " + op.name() + ": " + target + " on " +
                    std::to_string(src.count) + " index cell(s) */");
-  line(indent, "wait_for_accelerator_done();");
   line(indent, "for (int64_t __i = 0; __i < " + std::to_string(src.count) +
                    "LL; __i++) {");
   line(indent + 1, d + "[__i] = " + rhs + ";");
@@ -1321,6 +1296,11 @@ void CEmitter::emit_cond(const voyager::Operation& op,
 // ---------------------------------------------------------------------------
 
 void CEmitter::emit_dispatch(const voyager::Operation& op, int indent) {
+  // The enclosing commit, whose waits and post this dispatch carries. Taken
+  // here so that every way out of this function consumes it.
+  const voyager::Operation* commit = pending_commit_;
+  pending_commit_ = nullptr;
+
   if (surveying_) {
     // Record the first environment in which this dispatch's own guards hold.
     if (!speculative_) concrete_env_.emplace(&op, env_);
@@ -1665,14 +1645,117 @@ void CEmitter::emit_dispatch(const voyager::Operation& op, int indent) {
     decls_ << "\n};\n\n";
   }
 
-  // --- runtime patches, then the sends, in deque order ---
-  line(indent, "/* " + op.name() + " */");
-  if (!in_commit_) {
-    // Harness.cc:688, the pre-dispatch drain: a synchronous op waits on none
-    // of the semaphores the in-flight commits will post, so only a drain
-    // orders its fetches after their writes.
-    line(indent, "wait_for_accelerator_done();");
+  // --- the sends in deque order, grouped into the passes they start ---
+  // A MatrixParams is one pass on its matrix-class unit; a vector pass is two
+  // sends, VectorParams then its instructions. In an SpMM group the fused
+  // dense pass is sent first, ahead of the sparse params, inverting their
+  // order in the deque (Harness::dispatch_params).
+  struct Send {
+    size_t blob;
+    Unit unit;
+    bool starts_pass;
+  };
+  std::vector<Send> sends;
+  for (size_t i = 0; i < baseline.size();) {
+    const size_t before = i;
+    if (baseline[i].kind == kMatrixParams) {
+      const Unit unit = matrix_class_unit(baseline[i]);
+      if (unit == kUnitSpmm) {
+        const size_t sparse = i++;
+        if (i < baseline.size() && baseline[i].kind == kMatrixParams) {
+          sends.push_back({i, matrix_class_unit(baseline[i]), true});
+          i++;
+        }
+        sends.push_back({sparse, kUnitSpmm, true});
+      } else {
+        sends.push_back({i++, unit, true});
+      }
+    }
+    if (i < baseline.size() && baseline[i].kind == kVectorParams) {
+      sends.push_back({i++, kUnitVector, true});
+      if (i >= baseline.size() || baseline[i].kind != kVectorConfig) {
+        throw std::runtime_error("Dispatch " + op.name() +
+                                 ": VectorParams without its instructions.");
+      }
+      sends.push_back({i++, kUnitVector, false});
+    }
+    if (i == before) {
+      throw std::runtime_error("Dispatch " + op.name() + ": params blob " +
+                               std::to_string(i) + " starts no pass.");
+    }
   }
+  std::set<Unit> units;
+  size_t last_pass = 0;
+  for (size_t s = 0; s < sends.size(); s++) {
+    units.insert(sends[s].unit);
+    if (sends[s].starts_pass) last_pass = s;
+  }
+
+  // --- the commit's waits and post ---
+  // The hardware attaches the waits and the post issued since a unit's
+  // previous dispatch to the next pass whose params arrive on it. The waits
+  // go out before any send, so they gate the dispatch's first pass on their
+  // unit; the post goes out just before the last pass's params, so that pass
+  // adds 1 when it completes. "matrix" names the dispatch's matrix-class
+  // units: the systolic array or the MVM, and the SpMM unit, each of which
+  // gets every "matrix" wait.
+  std::vector<std::string> sync_lines;
+  std::string post_line;
+  if (commit != nullptr) {
+    const auto& async = commit->async();
+    const std::string who = "commit " + commit->name() + " in " + layer_;
+    std::map<Unit, int> waits_per_unit;
+    for (const auto& wait : async.waits()) {
+      std::vector<Unit> targets;
+      if (wait.unit() == "vector") {
+        targets.push_back(kUnitVector);
+      } else if (wait.unit() == "matrix") {
+        if (units.count(kUnitMatrix) && units.count(kUnitMvm)) {
+          throw std::runtime_error(who +
+                                   ": dispatch runs on both the matrix "
+                                   "unit and the MVM; \"matrix\" is "
+                                   "ambiguous.");
+        }
+        if (units.count(kUnitMvm)) targets.push_back(kUnitMvm);
+        if (units.count(kUnitMatrix)) targets.push_back(kUnitMatrix);
+        if (units.count(kUnitSpmm)) targets.push_back(kUnitSpmm);
+        if (targets.empty()) targets.push_back(kUnitMatrix);
+      } else {
+        throw std::runtime_error(who + ": unknown wait unit \"" + wait.unit() +
+                                 "\".");
+      }
+      const int64_t id = counter_id(wait.counter().box(), who);
+      for (const Unit unit : targets) {
+        if (units.count(unit) == 0) {
+          throw std::runtime_error(who + " waits on " + kUnitName[unit] +
+                                   ", which the dispatch does not use.");
+        }
+        if (++waits_per_unit[unit] > kWaitsPerPass) {
+          throw std::runtime_error(who + " carries more than " +
+                                   std::to_string(kWaitsPerPass) +
+                                   " waits on " + kUnitName[unit] + ".");
+        }
+        sync_lines.push_back("sync_wait(" + std::string(kUnitName[unit]) +
+                             ", " + std::to_string(id) + ", " +
+                             scalar_expr(wait.threshold()) + "); /* " +
+                             commit->name() + ": " +
+                             wait.counter().box().node() + " */");
+      }
+    }
+    if (async.has_post()) {
+      if (sends.empty()) {
+        throw std::runtime_error(who + " posts, but the dispatch has no pass.");
+      }
+      const int64_t id = counter_id(async.post().box(), who);
+      post_line = "sync_post(" + std::string(kUnitName[sends[last_pass].unit]) +
+                  ", " + std::to_string(id) + "); /* " + commit->name() + ": " +
+                  async.post().box().node() + " */";
+    }
+  }
+
+  // --- waits, runtime patches, sends with the post ---
+  line(indent, "/* " + op.name() + " */");
+  for (const auto& sync : sync_lines) line(indent, sync);
   for (const auto& field : fields) {
     // Terms are written against each scalar's baseline so a fractional
     // coefficient divides a multiple of its denominator. That fails with
@@ -1708,99 +1791,51 @@ void CEmitter::emit_dispatch(const voyager::Operation& op, int indent) {
                      std::to_string(field.len) + ", (uint64_t)(" +
                      std::to_string(field.base) + "LL" + expr + "));");
   }
-  // The synchronous post-drain below must observe each invocation group
-  // actually run: ACCELERATOR_RUNNING alone cannot tell granted-but-unstarted
-  // from finished, and it dips between the groups of a multi-pass dispatch.
-  // Record each group's closing unit (the last one to start, in
-  // Harness::dispatch_params' chunking) so the firmware can wait for its
-  // inflight count to rise before draining.
-  // Blob indices per invocation group, in the order dispatch_params sends
-  // them, plus the register whose inflight count the group's closing unit
-  // raises. release_starts opens a group matrix -> spmm -> vector, so the
-  // closing unit is the last of those the group actually starts.
-  struct EmitGroup {
-    std::vector<size_t> sends;
-    std::string close_reg;
-  };
-  std::vector<EmitGroup> emit_groups;
-  for (size_t i = 0; i < baseline.size();) {
-    EmitGroup group;
-    if (baseline[i].kind == kMatrixParams) {
-      bool group_mvm = false;
-#if SUPPORT_MVM
-      group_mvm = baseline[i].is_fc;
-#endif
-      bool group_spmm = false;
-#if SUPPORT_SPMM
-      group_spmm = !group_mvm && baseline[i].is_spmm;
-#endif
-      if (group_spmm) {
-        const size_t sparse = i++;
-        // A fused dense pass shares the group and is sent first, ahead of the
-        // sparse params, inverting their order in the deque.
-        if (i < baseline.size() && baseline[i].kind == kMatrixParams) {
-          group.sends.push_back(i++);
-        }
-        group.sends.push_back(sparse);
-        group.close_reg = "SPMM_UNIT_OP_INFLIGHT";
-      } else {
-        group.sends.push_back(i++);
-        group.close_reg =
-            group_mvm ? "MVM_UNIT_OP_INFLIGHT" : "MATRIX_UNIT_OP_INFLIGHT";
-      }
+  // Two consecutive passes of this op on one unit: the first posts the
+  // intra-op counter, the second waits for every post issued on it so far.
+  // A unit's queue keeps their start order but not completion before start.
+  const std::string intra = std::to_string(kIntraOpCounter);
+  int previous_pass = -1;
+  std::vector<bool> intra_post(sends.size(), false);
+  std::vector<bool> intra_wait(sends.size(), false);
+  for (size_t s = 0; s < sends.size(); s++) {
+    if (!sends[s].starts_pass) continue;
+    const bool same_unit =
+        previous_pass >= 0 && sends[previous_pass].unit == sends[s].unit;
+    if (same_unit) {
+      intra_post[previous_pass] = true;
+      intra_wait[s] = true;
     }
-    if (i < baseline.size() && baseline[i].kind == kVectorParams) {
-      group.sends.push_back(i++);  // VectorParams
-      group.sends.push_back(i++);  // VectorInstructionConfig
-      group.close_reg = "VECTOR_UNIT_OP_INFLIGHT";
-    }
-    emit_groups.push_back(std::move(group));
+    previous_pass = static_cast<int>(s);
   }
 
-  // The units arm their operand fetches the moment params arrive (the matrix
-  // unit fans params out before taking its start credit), so the operands
-  // must be in place by now. They are: the program's async_wait on each
-  // load's semaphore precedes this dispatch, and the firmware performed it.
-
-  for (size_t g = 0; g < emit_groups.size(); g++) {
-    for (const size_t i : emit_groups[g].sends) {
-      // Routing mirrors Harness::dispatch_params: an is_fc MatrixParams goes
-      // to the matrix-vector unit and an is_spmm one to the SpMM unit, each
-      // only when the build has that unit, else both fall back to the plain
-      // matrix unit.
-      bool to_mvm = false;
-#if SUPPORT_MVM
-      to_mvm = baseline[i].is_fc;
-#endif
-      bool to_spmm = false;
-#if SUPPORT_SPMM
-      to_spmm = !to_mvm && baseline[i].is_spmm;
-#endif
-      switch (baseline[i].kind) {
-        case kMatrixParams:
-          line(indent, std::string(to_spmm  ? "send_spmm_unit_params("
-                                   : to_mvm ? "send_matrix_vector_unit_params("
-                                            : "send_matrix_unit_params(") +
-                           blob_names[i] + ");");
-          break;
-        case kVectorParams:
-          line(indent, "send_vector_params(" + blob_names[i] + ");");
-          break;
-        case kVectorConfig:
-          line(indent, "send_vector_instructions(" + blob_names[i] + ");");
-          break;
-      }
+  for (size_t s = 0; s < sends.size(); s++) {
+    const std::string unit_name = kUnitName[sends[s].unit];
+    if (intra_wait[s]) {
+      line(indent, "sync_wait(" + unit_name + ", " + intra + ", " +
+                       kIntraOpPosts + "); /* after the op's previous pass */");
     }
-    // A synchronous dispatch mirrors Harness::execute's drain-dispatch-drain.
-    // Each group's wait must follow its own sends, not trail the whole
-    // dispatch: a later group's sends block on MMIO backpressure while
-    // earlier groups run, so trailing waits would miss their starts and spin
-    // forever. The last group's wait doubles as execute()'s post-dispatch
-    // drain. An asynchronous dispatch gets no wait here at all: its
-    // retirement is the commit's post, which the testbench observes.
-    if (!in_commit_) {
-      line(indent,
-           "wait_for_dispatch_retired(" + emit_groups[g].close_reg + ");");
+    if (s == last_pass && !post_line.empty()) line(indent, post_line);
+    if (intra_post[s]) {
+      line(indent, "sync_post(" + unit_name + ", " + intra + ");");
+      line(indent, std::string(kIntraOpPosts) + " += 1;");
+    }
+    const std::string& blob = blob_names[sends[s].blob];
+    switch (baseline[sends[s].blob].kind) {
+      case kMatrixParams: {
+        const char* sender =
+            sends[s].unit == kUnitSpmm  ? "send_spmm_unit_params("
+            : sends[s].unit == kUnitMvm ? "send_matrix_vector_unit_params("
+                                        : "send_matrix_unit_params(";
+        line(indent, sender + blob + ");");
+        break;
+      }
+      case kVectorParams:
+        line(indent, "send_vector_params(" + blob + ");");
+        break;
+      case kVectorConfig:
+        line(indent, "send_vector_instructions(" + blob + ");");
+        break;
     }
   }
 }
@@ -1809,7 +1844,9 @@ void CEmitter::emit_dispatch(const voyager::Operation& op, int indent) {
 // Translation unit
 // ---------------------------------------------------------------------------
 
-std::string CEmitter::emit_layer(const Model::Selection& selection) {
+std::string CEmitter::emit_layer(const Model::Selection& selection,
+                                 const std::string& layer) {
+  layer_ = layer;
   bounded_ = &selection.bounded;
   max_tiles_ = getenv_int("MAX_TILES", 0);
   // Survives the survey walk; everything else is rebuilt by it.
@@ -1829,14 +1866,13 @@ std::string CEmitter::emit_layer(const Model::Selection& selection) {
     scopes_.clear();
     scopes_.push_back({});
     name_counts_.clear();
-    sem_names_.clear();
     // These hold pointers into the previous layer's protobuf.
     scalar_def_.clear();
     loop_counter_steps_.clear();
     derived_scalars_.clear();
     loop_depth_ = 0;
     speculative_ = false;
-    in_commit_ = false;
+    pending_commit_ = nullptr;
 
     for (const auto* op : selection.ops) {
       // Selection.bounded gates the MAX_TILES clamp exactly as it does in the
@@ -1890,29 +1926,37 @@ std::string CEmitter::emit_layer(const Model::Selection& selection) {
   out << decls_.str();
   out << "int main() {\n";
   out << "\tenable_interrupts();\n";
-  out << "\tenable_semaphore_wait();\n";
   out << "\thost_init();\n\n";
-  out << "\treg_write64(VOYAGER_BASE_ADDR, SRAM_BASE);\n\n";
+  out << "\treg_write64(VOYAGER_BASE_ADDR, SRAM_BASE);\n";
+  out << "\tint64_t " << kIntraOpPosts << ";\n\n";
+
+  // The intra-op counter restarts with the program, where no pass is in
+  // flight: at the top of main() and of every POWER_LOOP pass.
+  const std::string intra_reset = "\tctr_reset(" +
+                                  std::to_string(kIntraOpCounter) + ");\n\t" +
+                                  kIntraOpPosts + " = 0;\n";
 
   // POWER_LOOP: replay the program forever, for a steady-state power
   // measurement on the chip. Every address is baked into the parameter blobs,
   // so a pass repeats the same dispatches over the same scratchpad slots and
-  // nothing drifts; the drain and the semaphore re-init at the top of the body
-  // keep each pass well-formed. The firmware never returns, so these ELFs are
-  // for a manual run, not for the graded flow.
+  // nothing drifts; the program's own ctr_reset ops and its quiescent
+  // epilogue keep each pass well-formed. The firmware never returns, so
+  // these ELFs are for a manual run, not for the graded flow.
   if (std::getenv("POWER_LOOP") != nullptr) {
     out << "\t/* POWER_LOOP: never returns */\n";
     out << "\twhile (1) {\n";
+    out << intra_reset;
     out << body_.str();
-    out << "\n\twait_for_accelerator_done();\n";
     out << "\t}\n";
     out << "}\n";
     return out.str();
   }
 
+  // The program ends quiescent on its own: its epilogue waits every counter
+  // it posted, so the units and the copies are done when the body returns.
+  out << intra_reset;
   out << body_.str();
   out << "\n\tprintf(\"All params sent!\\n\");\n\n";
-  out << "\twait_for_accelerator_done();\n";
   // The testbench grades the outputs before the firmware goes on to exit.
   out << "\thost_finish();\n\n";
   out << "\tprintf(\"Operation finished!\\n\");\n";

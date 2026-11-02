@@ -131,7 +131,9 @@ def run_rtl_simulation(
         # The testbench services the firmware's requests out of a mailbox in
         # the firmware's own memory; its address is wherever the linker put
         # it in this layer's ELF.
-        env_vars["HOST_MAILBOX"] = hex(elf_symbol_address(riscv_binary, "host_mailbox"))
+        env_vars["HOST_MAILBOX"] = hex(
+            elf_symbol_address(riscv_binary, "host_mailbox")
+        )
 
     if jtag_sim is None:
         cmd.extend([
@@ -538,7 +540,7 @@ def main():
     # scratchpad the Chipyard config instantiates.
     scratchpad_size = int(env_vars.setdefault("SCRATCHPAD_SIZE", "2097152"))
     scratchpad_offset = int(env_vars.setdefault("SCRATCHPAD_OFFSET", "0"))
-    num_banks = int(env_vars.setdefault("NUM_BANKS", "16"))
+    env_vars.setdefault("NUM_BANKS", "16")
 
     # The SoC targets require the IC=3 first conv lowered via im2col; the
     # channel-replication conv path is not supported here (see
@@ -782,7 +784,7 @@ def main():
                 if args.jtag_mode is not None and not args.semihosting:
                     extra_cflags.append("-DSUPPRESS_PRINTF")
                 # Full JTAG mode has no testbench: the image is preloaded, so
-                # the firmware's requests and waits compile to nothing.
+                # the firmware performs its copies' counter adds itself.
                 if args.jtag_mode == "full":
                     extra_cflags.append("-DNO_TESTBENCH")
                 # PLIC ids run in device order, so a config without the UART

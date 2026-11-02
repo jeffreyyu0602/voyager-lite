@@ -476,11 +476,10 @@ def run_accuracy(model, dataset, num_processes, output_folder):
         ]
     elif env_vars["DATATYPE"] == "MXINT8":
         quantization_args = [
-            "--force_scale_power_of_two",
             "--activation",
-            "int8,qs=microscaling,bs=" + str(block_size),
+            "int8,qs=microscaling,bs=" + str(block_size) + ",pot=1",
             "--weight",
-            "int8,qs=microscaling,bs=" + str(block_size),
+            "int8,qs=microscaling,bs=" + str(block_size) + ",pot=1",
             "--bf16",
             "--calibration_steps",
             "10",
@@ -503,8 +502,10 @@ def run_accuracy(model, dataset, num_processes, output_folder):
 
     # Keep in sync with codegen.mk's COMMON_FLAGS.
     common_flags = [
-        "--layout_policy",
-        "systolic",
+        "--tensor_layout",
+        "nhwc",
+        "--gemm_layout",
+        "xc,ck->xk",
         "--pe_array_size",
         f"{ic_unroll},{oc_unroll}",
         "--dump_tensors",
@@ -537,7 +538,7 @@ def run_accuracy(model, dataset, num_processes, output_folder):
         subprocess.run(
             [
                 "python",
-                "voyager-compiler/test/test_codegen.py",
+                "voyager-compiler/scripts/compile_model.py",
                 model,
                 "--model_name_or_path",
                 model_path,
@@ -715,6 +716,7 @@ def main():
                 tile_counts,
                 args.uniquify_layers,
                 skip_layers,
+                codegen_root=os.environ.get("CODEGEN_DIR", "build/codegen"),
             )
 
     if args.sims == "systemc" or args.sims == "fast-systemc":

@@ -9,7 +9,6 @@ host_request_t host_dummy_request;
 #else
 
 #include "mmio.h"
-#include "run_voyager_operation.h"
 #include "voyager_address.h"
 
 host_mailbox_t host_mailbox __attribute__((aligned(64)));
@@ -44,33 +43,32 @@ volatile host_request_t* host_slot(void) {
 
 /* The header of a slot the caller has already filled, then the doorbell. */
 static void host_ring(volatile host_request_t* slot, uint64_t kind,
-                      uint64_t ordinal, uint64_t nargs, uint64_t cell,
-                      uint64_t amount) {
+                      uint64_t ordinal, uint64_t nargs, uint64_t counter,
+                      uint64_t cell) {
   volatile host_mailbox_t* mailbox = &host_mailbox;
   slot->kind = kind;
   slot->ordinal = ordinal;
   slot->nargs = nargs;
+  slot->counter = counter;
   slot->cell = cell;
-  slot->amount = amount;
   HOST_FENCE();
   mailbox->head = mailbox->head + 1;
   HOST_FENCE();
-  reg_write8(DMA_SIGNAL_ID, HOST_DOORBELL_SEMAPHORE);
-  reg_write8(DMA_INC_SEM, 1); /* self-clearing pulse: +1 */
+  /* A register field takes a write only when every byte of it is written. */
+  reg_write32(HOST_DOORBELL, 1);
 }
 
 static void host_ring_sync(volatile host_request_t* slot, uint64_t kind,
                            uint64_t ordinal, uint64_t nargs) {
   host_sync_issued++;
-  host_ring(slot, kind, ordinal, nargs, (uint64_t)(uintptr_t)&host_sync, 1);
+  host_ring(slot, kind, ordinal, nargs, 0, (uint64_t)(uintptr_t)&host_sync);
   while (host_sync < host_sync_issued) {
   }
 }
 
 void host_copy(volatile host_request_t* slot, uint64_t ordinal, uint64_t nargs,
-               volatile int64_t* cell, int64_t amount) {
-  host_ring(slot, HOST_REQ_COPY, ordinal, nargs, (uint64_t)(uintptr_t)cell,
-            (uint64_t)amount);
+               uint64_t ctr) {
+  host_ring(slot, HOST_REQ_COPY, ordinal, nargs, ctr, 0);
 }
 
 void host_zero(uint64_t ordinal) {
@@ -79,20 +77,6 @@ void host_zero(uint64_t ordinal) {
 
 void host_op(volatile host_request_t* slot, uint64_t ordinal, uint64_t nargs) {
   host_ring_sync(slot, HOST_REQ_HOST_OP, ordinal, nargs);
-}
-
-void host_post(volatile int64_t* cell, int64_t amount) {
-  volatile host_request_t* slot = host_slot();
-  for (int u = 0; u < HOST_NUM_UNITS; u++)
-    slot->retired[u] = unit_ops_issued[u];
-  host_ring(slot, HOST_REQ_POST, 0, 0, (uint64_t)(uintptr_t)cell,
-            (uint64_t)amount);
-}
-
-void host_wait(volatile int64_t* posted, int64_t* balance) {
-  while (*posted + *balance < 1) {
-  }
-  (*balance)--;
 }
 
 void host_finish(void) { host_ring_sync(host_slot(), HOST_REQ_FINISH, 0, 0); }

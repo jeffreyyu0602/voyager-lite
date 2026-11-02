@@ -166,6 +166,10 @@ $(CC_BUILD_DIR)/%.o: $(ACCEL_DIR)/soc/jtag/%.cc
 	@mkdir -p $(CC_BUILD_DIR)
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
+$(CC_BUILD_DIR)/EmitC.o $(CC_BUILD_DIR)/HostRequests.o \
+$(CC_BUILD_DIR)/GenerateSoCBinaries.o: \
+	$(ACCEL_DIR)/soc/emitter/EmitC.h $(ACCEL_DIR)/soc/emitter/HostRequests.h
+
 # JtagMemory's layout is shared by three objects; a stale one corrupts the
 # heap (the class grew, the old object did not).
 $(CC_BUILD_DIR)/JtagPreload.o $(CC_BUILD_DIR)/JtagSimChecker.o \
