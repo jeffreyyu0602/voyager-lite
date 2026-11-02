@@ -46,7 +46,7 @@ void map_matrix_vector_multiply(const voyager::Operation& operation,
   vector_params->vector_fetch_0_mode = 2;
   vector_params->vector_fetch_0_broadcast = 0b010000;
 
-  int input_dtype = get_index_from_type_name<VU_INPUT_TYPES>(input.dtype);
+  int input_dtype = hw_dtype_index<VU_INPUT_TYPES>(input.dtype, "read");
   int input_dtype_width = get_type_width<VU_INPUT_TYPES>(input_dtype);
   int input_fetch_width = OC_DIMENSION * input_dtype_width;
 
@@ -67,7 +67,7 @@ void map_matrix_vector_multiply(const voyager::Operation& operation,
   vector_params->vector_fetch_1_offset = get_address(weight);
   vector_params->vector_fetch_1_mode = true;
 
-  int weight_dtype = get_index_from_type_name<VU_INPUT_TYPES>(weight.dtype);
+  int weight_dtype = hw_dtype_index<VU_INPUT_TYPES>(weight.dtype, "read");
   int weight_dtype_width = get_type_width<VU_INPUT_TYPES>(weight_dtype);
   int weight_fetch_width = OC_DIMENSION * weight_dtype_width;
 
@@ -100,7 +100,7 @@ void map_matrix_vector_multiply(const voyager::Operation& operation,
     vector_params->vector_fetch_2_mode = true;
     vector_params->vector_fetch_2_broadcast = nonzero_dims == 1 ? 0b011 : 0b000;
 
-    const int dtype = get_index_from_type_name<VU_INPUT_TYPES>(tensor.dtype);
+    const int dtype = hw_dtype_index<VU_INPUT_TYPES>(tensor.dtype, "read");
     const int dtype_width = get_type_width<VU_INPUT_TYPES>(dtype);
     const int fetch_width = OC_DIMENSION * dtype_width;
 
@@ -128,7 +128,7 @@ void map_matrix_vector_multiply(const voyager::Operation& operation,
   // output
   vector_params->vector_output_offset = get_address(output);
   vector_params->output_dtype =
-      get_index_from_type_name<OUTPUT_DATATYPES>(output.dtype);
+      hw_dtype_index<OUTPUT_DATATYPES>(output.dtype, "write");
 
   for (int i = 0; i < 3; i++) {
     vector_params->output_loops[0][i] = 1;

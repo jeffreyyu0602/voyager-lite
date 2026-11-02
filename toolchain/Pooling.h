@@ -21,7 +21,7 @@ void map_pool2d(const voyager::Operation& operation, const ScalarEnv& env,
   const auto tiling = get_pool2d_tiling(pooling_op, env);
 
   // input
-  int input_dtype = get_index_from_type_name<VU_INPUT_TYPES>(input.dtype);
+  int input_dtype = hw_dtype_index<VU_INPUT_TYPES>(input.dtype, "read");
   int input_dtype_width = get_type_width<VU_INPUT_TYPES>(input_dtype);
   int input_fetch_width = ACCUMULATOR_WIDTH * input_dtype_width;
 
@@ -69,7 +69,7 @@ void map_pool2d(const voyager::Operation& operation, const ScalarEnv& env,
   }
 
   vector_params->output_dtype =
-      get_index_from_type_name<OUTPUT_DATATYPES>(output.dtype);
+      hw_dtype_index<OUTPUT_DATATYPES>(output.dtype, "write");
 
   const int reduce_count = tiling.loops[1][tiling.y_loop_idx[1]] *
                            tiling.loops[1][tiling.x_loop_idx[1]];

@@ -23,7 +23,7 @@ void set_vector_fetch_1(const Tensor& tensor, const Tiling& tiling,
   vector_params->vector_fetch_1_mode = true;
   vector_params->vector_fetch_1_broadcast = nonzero_dims == 1 ? 0b011 : 0b000;
 
-  const int dtype = get_index_from_type_name<VU_INPUT_TYPES>(tensor.dtype);
+  const int dtype = hw_dtype_index<VU_INPUT_TYPES>(tensor.dtype, "read");
   const int dtype_width = get_type_width<VU_INPUT_TYPES>(dtype);
   const int fetch_width = OC_DIMENSION * dtype_width;
 
@@ -74,7 +74,7 @@ void set_vector_fetch_2(const Tensor& tensor, const Tiling& tiling,
   vector_params->vector_fetch_2_mode = true;
   vector_params->vector_fetch_2_broadcast = nonzero_dims == 1 ? 0b011 : 0b000;
 
-  const int dtype = get_index_from_type_name<VU_INPUT_TYPES>(tensor.dtype);
+  const int dtype = hw_dtype_index<VU_INPUT_TYPES>(tensor.dtype, "read");
   const int dtype_width = get_type_width<VU_INPUT_TYPES>(dtype);
   const int fetch_width = OC_DIMENSION * dtype_width;
 
@@ -348,7 +348,7 @@ void map_matrix_operation(const voyager::Operation& operation,
     // Set input fields
     matrix_params->input_offset = get_address(input);
     matrix_params->input_dtype =
-        get_index_from_type_name<INPUT_DATATYPE>(input.dtype);
+        hw_dtype_index<INPUT_DATATYPE>(input.dtype, "read");
     matrix_params->use_input_codebook = has_arg(matrix_op, "input_code");
 
     if (matrix_params->use_input_codebook) {
@@ -402,7 +402,7 @@ void map_matrix_operation(const voyager::Operation& operation,
     // Set weight fields
     matrix_params->weight_offset = get_address(weight);
     matrix_params->weight_dtype =
-        get_index_from_type_name<WEIGHT_DATATYPE>(weight.dtype);
+        hw_dtype_index<WEIGHT_DATATYPE>(weight.dtype, "read");
     matrix_params->use_weight_codebook = has_arg(matrix_op, "weight_code");
 
     if (matrix_params->use_weight_codebook) {
@@ -604,7 +604,7 @@ void map_matrix_operation(const voyager::Operation& operation,
     matrix_params->output_to_memory = true;
     matrix_params->output_offset = get_address(output);
     matrix_params->output_dtype =
-        get_index_from_type_name<MU_OUTPUT_TYPES>(output.dtype);
+        hw_dtype_index<MU_OUTPUT_TYPES>(output.dtype, "write");
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
     const size_t output_bw =
         get_type_width<MU_OUTPUT_TYPES>(matrix_params->output_dtype) *
@@ -664,7 +664,7 @@ void map_matrix_operation(const voyager::Operation& operation,
   }
 
   vector_params->output_dtype =
-      get_index_from_type_name<OUTPUT_DATATYPES>(output.dtype);
+      hw_dtype_index<OUTPUT_DATATYPES>(output.dtype, "write");
 
   vector_params->is_dwc = is_dwc;
 

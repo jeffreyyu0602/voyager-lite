@@ -10,6 +10,7 @@
 #include "test/gold/Microscaling.h"
 #include "test/gold/Pooling.h"
 #include "test/gold/QuantizeOps.h"
+#include "test/gold/RMSNorm.h"
 #include "test/gold/Reduction.h"
 #include "test/gold/ReshapeOps.h"
 #include "test/gold/SlicingOp.h"
@@ -251,6 +252,8 @@ std::vector<std::any> run_operation(const voyager::Operation& operation,
               op, env);
     } else if (target == "layer_norm") {
       output_ptr = layer_norm<Vector>(kwargs, op, env);
+    } else if (target == "rms_norm") {
+      output_ptr = rms_norm<Vector>(kwargs, op, env);
     } else if (target == "softmax") {
       output_ptr = softmax<Vector>(kwargs, op, env);
     } else if (target == "calculate_mx_qparam") {

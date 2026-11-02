@@ -67,7 +67,7 @@ void set_vector_fetch_1(const Tensor& tensor, std::vector<int> output_shape,
         input_shape[i] == 1 && output_shape[i] != 1;
   }
 
-  const int dtype = get_index_from_type_name<VU_INPUT_TYPES>(tensor.dtype);
+  const int dtype = hw_dtype_index<VU_INPUT_TYPES>(tensor.dtype, "read");
   const int dtype_width = get_type_width<VU_INPUT_TYPES>(dtype);
   const int fetch_width = OC_DIMENSION * dtype_width;
 
@@ -113,7 +113,7 @@ void set_vector_fetch_2(const Tensor& tensor, std::vector<int> output_shape,
     vector_params->vector_fetch_2_broadcast[i] = input_shape[i] == 1;
   }
 
-  const int dtype = get_index_from_type_name<VU_INPUT_TYPES>(tensor.dtype);
+  const int dtype = hw_dtype_index<VU_INPUT_TYPES>(tensor.dtype, "read");
   const int dtype_width = get_type_width<VU_INPUT_TYPES>(dtype);
   const int fetch_width = OC_DIMENSION * dtype_width;
 
@@ -407,7 +407,7 @@ void map_vector_operations(const voyager::Operation& operation,
     packing_factor = 1;
   }
 
-  const int dtype = get_index_from_type_name<VU_INPUT_TYPES>(input.dtype);
+  const int dtype = hw_dtype_index<VU_INPUT_TYPES>(input.dtype, "read");
   const int dtype_width = get_type_width<VU_INPUT_TYPES>(dtype);
   const int fetch_width = data_stride * dtype_width;
 
@@ -469,7 +469,7 @@ void map_vector_operations(const voyager::Operation& operation,
   }
 
   vector_params->output_dtype =
-      get_index_from_type_name<OUTPUT_DATATYPES>(output.dtype);
+      hw_dtype_index<OUTPUT_DATATYPES>(output.dtype, "write");
 
   // Set input broadcasting based on output shape
   if (!vector_params->has_permute && !vector_params->has_slicing &&

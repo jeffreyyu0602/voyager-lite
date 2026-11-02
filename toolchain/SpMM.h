@@ -60,7 +60,7 @@ void map_spmm(const voyager::Operation& operation, const ScalarEnv& env,
   spmm_param->weight_offset = get_address(weight_tensor);
 
   spmm_param->weight_dtype =
-      get_index_from_type_name<WEIGHT_DATATYPE>(weight_tensor.dtype);
+      hw_dtype_index<WEIGHT_DATATYPE>(weight_tensor.dtype, "read");
   spmm_param->use_weight_codebook = has_arg(spmm_op, "weight_code");
   if (spmm_param->use_weight_codebook) {
     const auto code = resolve(spmm_op, "weight_code", env);
@@ -152,7 +152,7 @@ void map_spmm(const voyager::Operation& operation, const ScalarEnv& env,
   vector_params->output_loops[1][2] = 1;
 
   vector_params->output_dtype =
-      get_index_from_type_name<OUTPUT_DATATYPES>(output.dtype);
+      hw_dtype_index<OUTPUT_DATATYPES>(output.dtype, "write");
 
   VectorInstructions inst;
   inst.op_type = VectorInstructions::vector;
