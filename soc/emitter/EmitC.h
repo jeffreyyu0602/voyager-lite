@@ -50,6 +50,9 @@ class CEmitter {
   std::string ref(const std::string& ssa_name) const;
 
   std::string scalar_expr(const voyager::ScalarValue& value) const;
+  // A wait's threshold, lowered by the stores a mid-tile cut dropped from
+  // its counter (Model::Selection::lowered).
+  std::string threshold_expr(const voyager::ScalarValue& value) const;
 
   // --- emission over the operation tree ---
   void emit_ops(
@@ -139,6 +142,7 @@ class CEmitter {
   std::vector<HostOp> host_table_;
   std::map<const voyager::PrimOp*, size_t> host_ordinals_;
   const std::set<const voyager::Operation*>* bounded_ = nullptr;
+  const std::map<const voyager::ScalarValue*, int64_t>* lowered_ = nullptr;
   int loop_depth_ = 0;
   int max_tiles_ = 0;
 

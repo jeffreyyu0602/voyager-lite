@@ -137,6 +137,7 @@ void Interpreter::log_counters() const {
 }
 
 void Interpreter::run(const Model::Selection& selection) {
+  lowered_ = &selection.lowered;
   for (const auto* op : selection.ops) {
     // Which top-level ops MAX_TILES bounds is the selection's decision -- it
     // stopped the walk at the loop it bounds -- so read it rather than work
@@ -147,6 +148,16 @@ void Interpreter::run(const Model::Selection& selection) {
     execute_operation(*op);
   }
   bound_current_top_ = true;
+  lowered_ = nullptr;
+}
+
+int64_t Interpreter::eval_threshold(const voyager::ScalarValue& value) const {
+  int64_t threshold = eval_int(value, env_);
+  if (lowered_ != nullptr) {
+    const auto found = lowered_->find(&value);
+    if (found != lowered_->end()) threshold -= found->second;
+  }
+  return threshold;
 }
 
 void Interpreter::execute_region(const voyager::Region& region) {
@@ -241,7 +252,7 @@ void Interpreter::execute_prim(const voyager::Operation& op,
     // sequential backend the wait must already hold; the Harness blocks the
     // walk until its completion threads have counted up to it.
     const auto& box = arg(prim, "counter").tensor_box().box();
-    const int64_t threshold = arg_int(prim, "threshold", env_);
+    const int64_t threshold = eval_threshold(arg(prim, "threshold").scalar());
     backend_->wait_counter(counter_id(box), threshold, prim.name());
     return;
   }
@@ -410,7 +421,7 @@ void Interpreter::execute_async(const voyager::Operation& op,
   for (const auto& wait : async.waits()) {
     const auto& box = wait.counter().box();
     sync.waits.push_back({wait.unit(), counter_id(box),
-                          eval_int(wait.threshold(), env_), box.node()});
+                          eval_threshold(wait.threshold()), box.node()});
   }
   if (async.has_post()) {
     const auto& box = async.post().box();

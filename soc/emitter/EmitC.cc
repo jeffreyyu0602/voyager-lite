@@ -620,6 +620,14 @@ void CEmitter::emit_counter_reset(const voyager::Operation& op, int indent) {
                    box->node() + " */");
 }
 
+std::string CEmitter::threshold_expr(
+    const voyager::ScalarValue& value) const {
+  const std::string expr = scalar_expr(value);
+  const auto found = lowered_->find(&value);
+  if (found == lowered_->end()) return expr;
+  return "(" + expr + ") - " + std::to_string(found->second) + "LL";
+}
+
 void CEmitter::emit_async_wait(const voyager::Operation& op,
                                const voyager::PrimOp& prim, int indent) {
   const std::string who = "async_wait " + op.name();
@@ -631,7 +639,7 @@ void CEmitter::emit_async_wait(const voyager::Operation& op,
   }
   const int64_t id = counter_id(counter->second.tensor_box().box(), who);
   line(indent, "ctr_wait(" + std::to_string(id) + ", " +
-                   scalar_expr(threshold->second.scalar()) + "); /* " +
+                   threshold_expr(threshold->second.scalar()) + "); /* " +
                    op.name() + " */");
 }
 
@@ -1737,7 +1745,7 @@ void CEmitter::emit_dispatch(const voyager::Operation& op, int indent) {
         }
         sync_lines.push_back("sync_wait(" + std::string(kUnitName[unit]) +
                              ", " + std::to_string(id) + ", " +
-                             scalar_expr(wait.threshold()) + "); /* " +
+                             threshold_expr(wait.threshold()) + "); /* " +
                              commit->name() + ": " +
                              wait.counter().box().node() + " */");
       }
@@ -1848,6 +1856,7 @@ std::string CEmitter::emit_layer(const Model::Selection& selection,
                                  const std::string& layer) {
   layer_ = layer;
   bounded_ = &selection.bounded;
+  lowered_ = &selection.lowered;
   max_tiles_ = getenv_int("MAX_TILES", 0);
   // Survives the survey walk; everything else is rebuilt by it.
   concrete_env_.clear();

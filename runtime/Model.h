@@ -29,11 +29,14 @@ class Model {
   // top-level op the layer's bufferized nest emitted, its epilogue included
   // -- or every op when unset, plus the ops MAX_TILES bounds (every selected
   // op; the bound acts only on an outermost loop). A cut that ends a tile
-  // loop mid-tile drops the epilogue's stores of that unfinished tile and
-  // the waits only they need.
+  // loop mid-tile drops the epilogue's stores of that unfinished tile; every
+  // later wait on a dropped store's counter, until that counter's next
+  // reset, is lowered by the stores dropped from it: `lowered` maps the
+  // wait's threshold (an async_wait's or a commit wait's) to that number.
   struct Selection {
     std::vector<const voyager::Operation*> ops;
     std::set<const voyager::Operation*> bounded;
+    std::map<const voyager::ScalarValue*, int64_t> lowered;
   };
 
   Selection selected_ops(const std::vector<std::string>& names) const;

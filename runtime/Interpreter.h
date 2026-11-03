@@ -61,6 +61,10 @@ class Interpreter {
   void execute_async(const voyager::Operation& op,
                      const voyager::AsyncOp& async);
 
+  // A wait's threshold, lowered by the stores a mid-tile cut dropped from
+  // its counter (Model::Selection::lowered).
+  int64_t eval_threshold(const voyager::ScalarValue& value) const;
+
   // Dispatch an accelerator operation, charging its ideal cycles to its layer.
   void dispatch(const voyager::Operation& op);
 
@@ -71,6 +75,8 @@ class Interpreter {
   ScalarEnv env_;
   int loop_depth_ = 0;
   bool bound_current_top_ = true;
+  // The running selection's lowered thresholds; null outside run().
+  const std::map<const voyager::ScalarValue*, int64_t>* lowered_ = nullptr;
   long matrix_cycles_ = 0;
   long vector_cycles_ = 0;
 

@@ -146,19 +146,11 @@ int64_t rounds_per_tile(const voyager::Operation& loop_op,
 }
 
 // The epilogue ops a cut that ends mid-tile must not run: each store of the
-// last output tile, which no pass finalized, and the wait before it on the
-// counter of that tile's last writer (a counter the loop's dispatches post).
-// The stores are the epilogue's copies from the scratchpad to DRAM.
+// last output tile, which no pass finalized. The stores are the epilogue's
+// copies from the scratchpad to DRAM.
 std::set<const voyager::Operation*> unfinished_tile_stores(
     const google::protobuf::RepeatedPtrField<voyager::Operation>& ops,
-    int loop_index, int end_index, const std::string& layer) {
-  std::set<std::string> unit_counters;
-  walk_op(ops.Get(loop_index), [&](const voyager::Operation& op) {
-    if (op.has_async() && op.async().has_post()) {
-      unit_counters.insert(op.async().post().box().node());
-    }
-  });
-
+    int loop_index, int end_index) {
   std::set<const voyager::Operation*> dropped;
   for (int i = loop_index + 1; i <= end_index; i++) {
     const voyager::Operation& op = ops.Get(i);
@@ -168,32 +160,10 @@ std::set<const voyager::Operation*> unfinished_tile_stores(
     const voyager::PrimOp& copy = op.prim();
     const auto& src = arg(copy, "src").tensor_box().box();
     const auto& dst = arg(copy, "dst").tensor_box().box();
-    if (src.memory().level() != voyager::MEMORY_LEVEL_SCRATCHPAD ||
-        !is_dram(dst)) {
-      continue;
+    if (src.memory().level() == voyager::MEMORY_LEVEL_SCRATCHPAD &&
+        is_dram(dst)) {
+      dropped.insert(&op);
     }
-    // The wait guarding the store sits before it, after any address
-    // arithmetic and views.
-    int wait_index = i - 1;
-    while (wait_index > loop_index && ops.Get(wait_index).has_prim() &&
-           ops.Get(wait_index).prim().target() != "voyager::async_wait" &&
-           ops.Get(wait_index).prim().target() != "voyager::async_copy") {
-      wait_index--;
-    }
-    const voyager::Operation& wait = ops.Get(wait_index);
-    const bool guards = wait.has_prim() &&
-                        wait.prim().target() == "voyager::async_wait" &&
-                        unit_counters.count(arg(wait.prim(), "counter")
-                                                .tensor_box()
-                                                .box()
-                                                .node()) != 0;
-    if (!guards) {
-      throw std::runtime_error(
-          "Layer " + layer + ": the epilogue store " + op.name() +
-          " has no wait on a counter the loop's dispatches post before it.");
-    }
-    dropped.insert(&op);
-    dropped.insert(&wait);
   }
   return dropped;
 }
@@ -309,6 +279,31 @@ Model::Selection Model::selected_ops(
 
   const int64_t max_tiles = getenv_int("MAX_TILES", 0);
 
+  // Stores the cuts dropped, per counter node, since that counter's last
+  // reset. Every wait on such a counter counts them, so it is lowered by
+  // that many.
+  std::map<std::string, int64_t> unposted;
+  const auto lower = [&](const std::string& counter,
+                         const voyager::ScalarValue& threshold) {
+    const auto found = unposted.find(counter);
+    if (found != unposted.end()) selection.lowered[&threshold] = found->second;
+  };
+  const Visitor lower_waits = [&](const voyager::Operation& op) {
+    if (op.has_async()) {
+      for (const auto& wait : op.async().waits()) {
+        lower(wait.counter().box().node(), wait.threshold());
+      }
+    }
+    if (!op.has_prim()) return;
+    const voyager::PrimOp& prim = op.prim();
+    if (prim.target() == "voyager::zeros") {
+      unposted.erase(arg(prim, "input").tensor_box().box().node());
+    } else if (prim.target() == "voyager::async_wait") {
+      lower(arg(prim, "counter").tensor_box().box().node(),
+            arg(prim, "threshold").scalar());
+    }
+  };
+
   for (const auto& name : names) {
     int start_index = -1;
     int end_index = -1;
@@ -351,7 +346,8 @@ Model::Selection Model::selected_ops(
     // epilogue, which follows the loop, still runs: it reads the counts the
     // loop reached, so the whole extent is selected and its loops bounded. A
     // cut that ends mid-tile leaves the last tile unfinished, so the epilogue
-    // runs without that tile's stores.
+    // runs without that tile's stores, and the waits that count them are
+    // lowered.
     std::set<const voyager::Operation*> dropped;
     for (int i = start_index; i <= end_index && max_tiles > 0; i++) {
       const voyager::Operation& op = model_.ops(i);
@@ -367,15 +363,22 @@ Model::Selection Model::selected_ops(
           step;
       if (max_tiles >= trips) continue;
       if (max_tiles % rounds_per_tile(op, name) == 0) continue;
-      const auto stores =
-          unfinished_tile_stores(model_.ops(), i, end_index, name);
+      const auto stores = unfinished_tile_stores(model_.ops(), i, end_index);
       dropped.insert(stores.begin(), stores.end());
     }
 
     for (int i = start_index; i <= end_index; i++) {
       const voyager::Operation& op = model_.ops(i);
-      if (dropped.count(&op) != 0) continue;
-      if (!contains(selection.ops, &op)) selection.ops.push_back(&op);
+      if (dropped.count(&op) != 0) {
+        const voyager::PrimOp& store = op.prim();
+        if (has_tensor(store, "counter")) {
+          unposted[arg(store, "counter").tensor_box().box().node()]++;
+        }
+        continue;
+      }
+      if (contains(selection.ops, &op)) continue;
+      walk_op(op, lower_waits);
+      selection.ops.push_back(&op);
       selection.bounded.insert(&op);
     }
   }
