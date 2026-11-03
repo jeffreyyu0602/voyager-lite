@@ -20,6 +20,8 @@ class VoyagerVerification extends BlackBox with HasBlackBoxPath {
   addPath(s"$voyagerWrapperDir/csrc/SoCSimulation.h")
   addPath(s"$voyagerWrapperDir/csrc/SoCMemory.cc")
   addPath(s"$voyagerWrapperDir/csrc/SoCMemory.h")
+  addPath(s"$voyagerWrapperDir/csrc/DMATest.cc")
+  addPath(s"$voyagerWrapperDir/csrc/DMATest.h")
 
   // Accelerator Verification Collateral (new-IR toolchain)
   addPath(s"$voyagerDir/test/gold/GoldModel.cc")

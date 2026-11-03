@@ -308,7 +308,8 @@ class Accelerator(
   bitWidth:                  Int,
   scaleBitWidth:             Int,
   supportMX:                 Boolean,
-  mvUnitWidth:               Int)
+  mvUnitWidth:               Int,
+  hwDMA:                     Boolean)
     extends BlackBox
     with HasBlackBoxPath {
 
@@ -378,7 +379,7 @@ class Accelerator(
                     |export SUPPORT_MVM=${supportMVM}
                     |export SUPPORT_SPMM=${supportSpmm}
                     |export MV_UNIT_WIDTH=${mvUnitWidth}
-                    |""".stripMargin
+                    |""".stripMargin + (if (hwDMA) "export HW_DMA=true\n" else "")
   val file      = new java.io.File(shellPath);
   if (!file.getParentFile().exists()) {
     file.getParentFile().mkdirs();
@@ -418,6 +419,8 @@ class TLVoyager(
   }
   val supportMX          = config.datatype.startsWith("MX")
   val supportMVM         = config.supportMVM
+  // The DMA engine and the write-acknowledged posts, in a config that has them.
+  val dmaParams          = p(VoyagerDMAKey)
   // The MVM unit's lanes, and its scale ports' width: one block scale per
   // array-width group of lanes (the accelerator's MVU_SCALE_PORT_WIDTH).
   val mvUnitWidth        = config.mvUnitWidth.getOrElse(config.ocDimension)
@@ -478,7 +481,7 @@ class TLVoyager(
 
   def makeWrite(name: String, width: Int, destNode: TLNode, enabled: Boolean = true) = {
     if (enabled) {
-      val interface = LazyModule(new TLFullWriteInterface(name, width, 16, 16)(p))
+      val interface = LazyModule(new TLFullWriteInterface(name, width, 16, 16, dmaParams.isDefined)(p))
       connectInterface(interface.node, destNode, width)
       interface
     } else null
@@ -547,6 +550,19 @@ class TLVoyager(
   val spmm_unit_weight_scale_interface  =
     makeRead("SpMM Unit Weight Scale", ocPortWidth, spmm_unit_weight_scale_tl_node, config.supportSpmm)
 
+  // The DMA engine's two queues, loads and stores, each an engine of its own
+  // on the system bus (VoyagerDMA.scala).
+  val dma_engines  = dmaParams.toSeq.flatMap { params =>
+    Seq("Voyager DMA Load", "Voyager DMA Store").zipWithIndex.map { case (name, queue) =>
+      LazyModule(new VoyagerDMAEngine(name, queue, params)(p))
+    }
+  }
+  val dma_tl_nodes = dma_engines.flatMap(engine => Seq(engine.readNode, engine.writeNode)).map { client =>
+    val node = TLIdentityNode()
+    node := client
+    node
+  }
+
   val intNode = IntSourceNode(IntSourcePortSimple())
 
   override lazy val module = new VoyagerImpl
@@ -571,6 +587,7 @@ class TLVoyager(
           scaleDatatypeWidth,
           supportMX,
           mvUnitWidth,
+          dmaParams.isDefined,
         )
       )
 
@@ -611,6 +628,33 @@ class TLVoyager(
       // The DMA engine's completion port: +1 to a counter when a copy lands.
       val counter_add_port = Module(new CounterAddPort)
 
+      // In a DMA config a unit's post waits until every write the unit issued
+      // before its done is acknowledged: each unit's write interfaces, by the
+      // accelerator's port prefix, and its AckedPost; unitWrites connects the
+      // counts once the ports are mapped. An accelerator without MX or SpMM
+      // leaves that output's valid undriven, so it is not counted.
+      val ackedPosts = dmaParams.map { _ =>
+        val vectorOutputs = Seq(
+          Some("vector_output" -> vector_output_interface),
+          Option.when(supportMX)("mx_scale_output" -> mx_scale_output_interface),
+          Option.when(config.supportSpmm)("sparse_tensor_output" -> sparse_tensor_output_interface),
+        ).flatten
+        val unitOutputs = Seq(
+          Seq("matrix_unit_output" -> matrix_unit_output_interface),
+          vectorOutputs,
+          Nil,
+          Nil,
+        )
+        syncs.zip(unitOutputs).zipWithIndex.map { case ((sync, outputs), unit) =>
+          val acked = Module(
+            new AckedPost(idBits = log2Ceil(numCounters), depth = 8, unit = unit, writers = outputs.size)
+          )
+          acked.io.posted := sync.io.posted
+          (acked, outputs)
+        }
+      }
+      val posted     = ackedPosts.map(_.map(_._1.io.out)).getOrElse(syncs.map(_.io.posted))
+
       // CPU-side reset and add of one counter: the add stands in for a copy's
       // completion when the data is preloaded (full JTAG mode, the chip).
       val ctr_reset = Wire(Decoupled(UInt(8.W)))
@@ -619,11 +663,11 @@ class TLVoyager(
       ctr_add.ready := true.B
 
       for (i <- 0 until numCounters) {
-        val posts = syncs.map(sync => sync.io.posted.valid && sync.io.posted.bits === i.U)
+        val posts = posted.map(post => post.valid && post.bits === i.U)
         val added = Seq(
           counter_add_port.io.add_vld && counter_add_port.io.add_id === i.U,
           ctr_add.valid && ctr_add.bits === i.U,
-        )
+        ) ++ dma_engines.map(engine => engine.module.io.posted.valid && engine.module.io.posted.bits === i.U)
         val incs  = (posts ++ added).map(_.asUInt).reduce(_ +& _)
         when(ctr_reset.valid && ctr_reset.bits === i.U) {
           counters(i) := 0.U
@@ -729,6 +773,19 @@ class TLVoyager(
         )
       }
 
+      // A DMA config's per-unit write counts: per write interface, the words
+      // the unit has handed it (this cycle's included), and its progress.
+      def unitWrites(unit: Int): Unit = ackedPosts.foreach { posts =>
+        val (acked, outputs) = posts(unit)
+        outputs.zipWithIndex.foreach { case ((prefix, interface), i) =>
+          val fire  = bool(s"${prefix}_data_vld") && bool(s"${prefix}_data_rdy")
+          val count = RegInit(0.U(32.W))
+          when(fire) { count := count + 1.U }
+          acked.io.issued(i) := count + fire.asUInt
+          acked.io.counts(i) := interface.module.writeCounts.get
+        }
+      }
+
       io_map("clk")  := clock
       io_map("rstn") := ~(reset.asBool)
 
@@ -758,6 +815,7 @@ class TLVoyager(
       }
 
       connectUnit(0, "matrix_unit", matrix_unit_params_in_q, 0x100)
+      unitWrites(0)
 
       // -------------------------------
       // Vector Unit
@@ -783,6 +841,7 @@ class TLVoyager(
         connectOutput("sparse_tensor_output", ocPortWidth, sparse_tensor_output_interface)
 
       connectUnit(1, "vector_unit", vector_unit_params_in_q, 0x200)
+      unitWrites(1)
 
       // -------------------------------
       // Matrix Vector Unit
@@ -845,7 +904,8 @@ class TLVoyager(
       // The accelerator is busy while any unit has a pass dispatched, queued
       // behind a wait included (what ctr_drain polls); its cycle count runs
       // while a pass is running.
-      val accel_busy              = syncs.map(_.io.inflight =/= 0.U).reduce(_ || _)
+      val accel_busy              =
+        (syncs.map(_.io.inflight =/= 0.U) ++ ackedPosts.toSeq.flatten.map(_._1.io.pending)).reduce(_ || _)
       val accel_running           = syncs.map(_.io.running).reduce(_ || _)
       val accelerator_cycle_count = WideCounter(64, accel_running)
 
@@ -879,6 +939,61 @@ class TLVoyager(
         0x020 -> Seq(RegField.w1ToClear(16, int_status, int_set_signals)),
         0x028 -> Seq(RegField(16, int_enable)),
       )
+      // The DMA engine's registers (layout in soc/firmware/common/dma.h): a
+      // staged descriptor, pushed onto queue PUSH's data names (0 loads, 1
+      // stores); BUSY bit q while queue q holds or runs a copy; each queue's
+      // busy cycles, and each unit's counter-wait stall cycles.
+      dmaParams.foreach { params =>
+        val initial = Wire(new DMADescriptor)
+        initial := 0.U.asTypeOf(initial)
+        initial.count.foreach(_ := 1.U)
+        val staged  = RegInit(initial)
+
+        val queues = dma_engines.map { engine =>
+          val queue = Module(new Queue(new DMADescriptor, params.queueDepth))
+          engine.module.io.desc <> queue.io.deq
+          queue
+        }
+        val push   = Wire(Decoupled(UInt(8.W)))
+        queues.zipWithIndex.foreach { case (queue, q) =>
+          queue.io.enq.valid := push.valid && push.bits === q.U
+          queue.io.enq.bits  := staged
+        }
+        push.ready := VecInit(queues.map(_.io.enq.ready))(push.bits(0))
+
+        val busy       = dma_engines.zip(queues).map { case (engine, queue) =>
+          engine.module.io.busy || queue.io.deq.valid
+        }
+        val busyCycles = busy.map(b => WideCounter(64, b))
+        // Per unit: cycles it sat idle while its next dispatched pass waited
+        // on its counters.
+        val waitStalls = syncs.map(sync =>
+          WideCounter(64, sync.io.inflight =/= 0.U && !sync.io.running && !sync.io.start_rdy)
+        )
+
+        voyager_reg_map ++= Seq(
+          0x700 -> Seq(RegField(64, staged.src)),
+          0x708 -> Seq(RegField(64, staged.dst)),
+          0x710 -> Seq(RegField(32, staged.inner)),
+          0x718 -> Seq(RegField(16, staged.ctrl)),
+        )
+        voyager_reg_map ++= (0 until 3).flatMap { k =>
+          Seq(
+            (0x720 + 0x18 * k) -> Seq(RegField(32, staged.count(k))),
+            (0x728 + 0x18 * k) -> Seq(RegField(64, staged.srcStride(k))),
+            (0x730 + 0x18 * k) -> Seq(RegField(64, staged.dstStride(k))),
+          )
+        }
+        voyager_reg_map ++= Seq(
+          0x768 -> Seq(RegField.w(8, push)),
+          0x770 -> Seq(RegField.r(8, Cat(busy.reverse).pad(8))),
+          0x778 -> Seq(RegField.r(64, busyCycles(0).value)),
+          0x780 -> Seq(RegField.r(64, busyCycles(1).value)),
+        )
+        voyager_reg_map ++= waitStalls.zipWithIndex.map { case (stall, unit) =>
+          (0x788 + 8 * unit) -> Seq(RegField.r(64, stall.value))
+        }
+      }
       voyager_node.regmap(voyager_reg_map.toSeq: _*)
     }
   }
@@ -956,6 +1071,10 @@ trait CanHavePeripheryVoyager { this: BaseSubsystem =>
       sbus.coupleFrom("voyager_spmm_unit_weight_scale") {
         _ := sbus { TLBuffer() } := voyager.spmm_unit_weight_scale_tl_node
       }
+    }
+
+    voyager.dma_tl_nodes.zipWithIndex.foreach { case (node, q) =>
+      sbus.coupleFrom(s"voyager_dma_$q") { _ := sbus { TLBuffer() } := node }
     }
 
     pbus.coupleTo("voyager") {

@@ -114,7 +114,8 @@ COMMON_OBJS := \
 
 SOC_OBJS := \
 	$(CC_BUILD_DIR)/EmitC.o \
-	$(CC_BUILD_DIR)/HostRequests.o
+	$(CC_BUILD_DIR)/HostRequests.o \
+	$(CC_BUILD_DIR)/DMALowering.o
 
 # Full JTAG mode: the scratchpad image the emitter writes next to each
 # program (derived from the schedule ScheduleRecorder records), and the
@@ -167,8 +168,10 @@ $(CC_BUILD_DIR)/%.o: $(ACCEL_DIR)/soc/jtag/%.cc
 	$(CC) $(C17FLAGS) -c -o $@ $<
 
 $(CC_BUILD_DIR)/EmitC.o $(CC_BUILD_DIR)/HostRequests.o \
-$(CC_BUILD_DIR)/GenerateSoCBinaries.o: \
-	$(ACCEL_DIR)/soc/emitter/EmitC.h $(ACCEL_DIR)/soc/emitter/HostRequests.h
+$(CC_BUILD_DIR)/GenerateSoCBinaries.o $(CC_BUILD_DIR)/DMALowering.o: \
+	$(ACCEL_DIR)/soc/emitter/EmitC.h $(ACCEL_DIR)/soc/emitter/HostRequests.h \
+	$(ACCEL_DIR)/soc/emitter/DMALowering.h $(ACCEL_DIR)/soc/emitter/DMAModel.h \
+	$(ACCEL_DIR)/soc/firmware/common/dma.h
 
 # JtagMemory's layout is shared by three objects; a stale one corrupts the
 # heap (the class grew, the old object did not).

@@ -67,6 +67,10 @@
 
 // --- Memory ---
 #define SRAM_BASE (0x40000000L)
+// A DRAM config's memory (WithVoyagerDRAM): planned DRAM address a is at
+// DRAM_BASE + a.
+#define DRAM_BASE (0x100000000ULL)
+#define DRAM_SIZE (0x100000000ULL)
 
 // Bit definitions
 #define INT_BANK0 (1 << 0)

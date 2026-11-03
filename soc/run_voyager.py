@@ -503,6 +503,14 @@ def main():
         ),
     )
     parser.add_argument(
+        "--mailbox",
+        action="store_true",
+        help=(
+            "On a DRAM config, serve the copies from the testbench mailbox "
+            "instead of the DMA engine."
+        ),
+    )
+    parser.add_argument(
         "--build-only",
         action="store_true",
         help=(
@@ -788,6 +796,10 @@ def main():
                 # the firmware performs its copies' counter adds itself.
                 if args.jtag_mode == "full":
                     extra_cflags.append("-DNO_TESTBENCH")
+                # A DRAM config's firmware moves its copies with the DMA
+                # engine, unless --mailbox keeps them on the testbench.
+                if env_vars.get("HW_DMA") == "true" and not args.mailbox:
+                    extra_cflags.append("-DHW_DMA")
                 # PLIC ids run in device order, so a config without the UART
                 # (which takes id 1) moves Voyager down to it. The firmware
                 # defaults to the id the UART-bearing configs give it.

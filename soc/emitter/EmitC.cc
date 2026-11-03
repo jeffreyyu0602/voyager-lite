@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <deque>
 #include <iomanip>
+#include <iostream>
 #include <stdexcept>
 
 #include "runtime/Utils.h"
@@ -316,21 +317,22 @@ void CEmitter::line(int indent, const std::string& text) {
 // is worth surveying -- the survey walks the tile loop for real, evaluating
 // arms the single emitting walk never enters concretely, which is needless
 // exposure anywhere it cannot pay off.
-bool CEmitter::cond_guards_dispatch(const voyager::Operation& op) const {
+bool CEmitter::cond_guards_dispatch(const voyager::Operation& op,
+                                    bool requests) const {
   switch (op.op_type_case()) {
     case voyager::Operation::kCond:
       for (const auto& child : op.cond().true_region().ops()) {
-        if (contains_dispatch(child)) return true;
+        if (contains_dispatch(child, requests)) return true;
       }
       for (const auto& child : op.cond().false_region().ops()) {
-        if (contains_dispatch(child)) return true;
+        if (contains_dispatch(child, requests)) return true;
       }
       // A nested conditional may still guard one.
       for (const auto& child : op.cond().true_region().ops()) {
-        if (cond_guards_dispatch(child)) return true;
+        if (cond_guards_dispatch(child, requests)) return true;
       }
       for (const auto& child : op.cond().false_region().ops()) {
-        if (cond_guards_dispatch(child)) return true;
+        if (cond_guards_dispatch(child, requests)) return true;
       }
       return false;
     case voyager::Operation::kLoop: {
@@ -338,18 +340,18 @@ bool CEmitter::cond_guards_dispatch(const voyager::Operation& op) const {
                              ? op.loop().for_loop().body()
                              : op.loop().while_loop().body();
       for (const auto& child : body.ops()) {
-        if (cond_guards_dispatch(child)) return true;
+        if (cond_guards_dispatch(child, requests)) return true;
       }
       if (op.loop().has_while_loop()) {
         for (const auto& child : op.loop().while_loop().condition().ops()) {
-          if (cond_guards_dispatch(child)) return true;
+          if (cond_guards_dispatch(child, requests)) return true;
         }
       }
       return false;
     }
     case voyager::Operation::kAsync:
       for (const auto& child : op.async().body().ops()) {
-        if (cond_guards_dispatch(child)) return true;
+        if (cond_guards_dispatch(child, requests)) return true;
       }
       return false;
     default:
@@ -357,9 +359,19 @@ bool CEmitter::cond_guards_dispatch(const voyager::Operation& op) const {
   }
 }
 
-bool CEmitter::contains_dispatch(const voyager::Operation& op) const {
+bool CEmitter::contains_dispatch(const voyager::Operation& op,
+                                 bool requests) const {
   switch (op.op_type_case()) {
-    case voyager::Operation::kPrim:
+    case voyager::Operation::kPrim: {
+      if (requests) {
+        const auto host = host_ordinals_.find(&op.prim());
+        if (host != host_ordinals_.end() &&
+            host_table_[host->second].kind != HostOp::kHostOp) {
+          return true;
+        }
+      }
+      return is_datapath(op);
+    }
     case voyager::Operation::kFused:
       return is_datapath(op);
     case voyager::Operation::kLoop: {
@@ -367,26 +379,26 @@ bool CEmitter::contains_dispatch(const voyager::Operation& op) const {
                              ? op.loop().for_loop().body()
                              : op.loop().while_loop().body();
       for (const auto& child : body.ops()) {
-        if (contains_dispatch(child)) return true;
+        if (contains_dispatch(child, requests)) return true;
       }
       if (op.loop().has_while_loop()) {
         for (const auto& child : op.loop().while_loop().condition().ops()) {
-          if (contains_dispatch(child)) return true;
+          if (contains_dispatch(child, requests)) return true;
         }
       }
       return false;
     }
     case voyager::Operation::kCond:
       for (const auto& child : op.cond().true_region().ops()) {
-        if (contains_dispatch(child)) return true;
+        if (contains_dispatch(child, requests)) return true;
       }
       for (const auto& child : op.cond().false_region().ops()) {
-        if (contains_dispatch(child)) return true;
+        if (contains_dispatch(child, requests)) return true;
       }
       return false;
     case voyager::Operation::kAsync:
       for (const auto& child : op.async().body().ops()) {
-        if (contains_dispatch(child)) return true;
+        if (contains_dispatch(child, requests)) return true;
       }
       return false;
     default:
@@ -668,6 +680,137 @@ void CEmitter::emit_async(const voyager::Operation& op, int indent) {
 void CEmitter::emit_host_request(const voyager::Operation& op,
                                  const voyager::PrimOp& prim, size_t ordinal,
                                  int indent) {
+  const HostOp& host = host_table_.at(ordinal);
+  const bool movable = host.kind == HostOp::kCopy || host.kind == HostOp::kZero;
+  if (!hw_dma_ || !movable) {
+    emit_mailbox_request(op, prim, ordinal, indent);
+    return;
+  }
+  if (surveying_) {
+    // As for a dispatch: the first environment with its guards true.
+    if (!speculative_) concrete_env_.emplace(&op, env_);
+    return;
+  }
+  line(0, "#ifdef HW_DMA");
+  if (emit_dma_request(op, prim, ordinal, indent)) {
+    line(0, "#else");
+    emit_mailbox_request(op, prim, ordinal, indent);
+    line(0, "#endif");
+  } else {
+    line(0, "#endif");
+    emit_mailbox_request(op, prim, ordinal, indent);
+  }
+}
+
+bool CEmitter::emit_dma_request(const voyager::Operation& op,
+                                const voyager::PrimOp& prim, size_t ordinal,
+                                int indent) {
+  const HostOp& host = host_table_.at(ordinal);
+  const char* kind = host.kind == HostOp::kCopy ? "copy" : "zero fill";
+
+  // Lowered under an environment the program reaches, as a dispatch is
+  // mapped (emit_dispatch); the C names the variables in scope here.
+  const ScalarEnv* env = &env_;
+  if (speculative_) {
+    const auto surveyed = concrete_env_.find(&op);
+    if (surveyed != concrete_env_.end()) env = &surveyed->second;
+  }
+  DMALowering lowering = lower_to_dma(
+      host, *env, [&](const std::string& name) { return derived_step(name); });
+
+  int64_t counter = -1;
+  if (lowering.lowered && host.kind == HostOp::kCopy) {
+    const auto found = prim.kwargs().find("counter");
+    if (found == prim.kwargs().end() || !found->second.has_tensor_box()) {
+      lowering.lowered = false;
+      lowering.reason = "carries no counter";
+    } else {
+      counter = counter_id(found->second.tensor_box().box(),
+                           "async_copy " + op.name());
+      // Every copy on one counter goes to the queue its first copy took.
+      lowering.queue =
+          counter_queues_.emplace(counter, lowering.queue).first->second;
+    }
+  }
+
+  if (!lowering.lowered) {
+    dma_fallbacks_++;
+    std::cerr << "[DMA] " << layer_ << ": " << kind << " " << op.name()
+              << " falls back to the mailbox: it " << lowering.reason
+              << std::endl;
+    line(indent, "/* " + op.name() + ": mailbox, " + lowering.reason + " */");
+    line(indent, "dma_wait_idle((1u << DMA_LOAD) | (1u << DMA_STORE));");
+    return false;
+  }
+
+  const DMADescriptor& copy = lowering.descriptor;
+  const bool transposed = (copy.ctrl & DMA_TRANSPOSED) != 0;
+  dma_lowered_++;
+  if (transposed) dma_transposed_++;
+  const char* shape = !transposed                      ? ""
+                      : (copy.ctrl & DMA_NIBBLES) != 0 ? ", transposed 4-bit"
+                                                       : ", transposed";
+  std::cerr << "[DMA] " << layer_ << ": " << kind << " " << op.name()
+            << " lowered" << shape << std::endl;
+
+  // base + sum(coefficient * scalar), in wrapping 64-bit arithmetic.
+  auto address = [&](uint64_t at,
+                     const std::map<std::string, int64_t>& coefficients) {
+    uint64_t base = at;
+    std::string terms;
+    for (const auto& [name, coefficient] : coefficients) {
+      if (coefficient == 0) continue;
+      base -= static_cast<uint64_t>(coefficient) *
+              static_cast<uint64_t>(lowering.base_values.at(name));
+      terms += " + (uint64_t)(" + std::to_string(coefficient) + "LL * " +
+               ref(name) + ")";
+    }
+    std::ostringstream hex;
+    hex << "0x" << std::hex << base << "ULL";
+    return hex.str() + terms;
+  };
+
+  std::string ctrl = "0x" + [&] {
+    std::ostringstream hex;
+    hex << std::hex << copy.ctrl;
+    return hex.str();
+  }();
+  if (counter >= 0) {
+    ctrl += " | DMA_POST | DMA_COUNTER(" + std::to_string(counter) + ")";
+  }
+  std::string levels;
+  for (int k = 0; k < DMA_LEVELS; k++) {
+    levels += std::string(k ? ", " : "") + "{" +
+              std::to_string(copy.levels[k].count) + "u, " +
+              std::to_string(copy.levels[k].src_stride) + "LL, " +
+              std::to_string(copy.levels[k].dst_stride) + "LL}";
+  }
+  const std::string queue =
+      lowering.queue == DMA_LOAD ? "DMA_LOAD" : "DMA_STORE";
+
+  line(indent, "{ /* " + op.name() + ": DMA" +
+                   (transposed ? ", transposed" : "") + " */");
+  line(indent + 1,
+       "static const dma_level_t __levels[DMA_LEVELS] = {" + levels + "};");
+  // A zero fill is synchronous, ordered after every copy before it.
+  if (host.kind == HostOp::kZero) {
+    line(indent + 1, "dma_wait_idle((1u << DMA_LOAD) | (1u << DMA_STORE));");
+  }
+  line(indent + 1, "dma_push(" + queue + ", " +
+                       address(copy.src, lowering.src_coefficients) + ", " +
+                       address(copy.dst, lowering.dst_coefficients) + ", " +
+                       std::to_string(copy.inner) + "u, " + ctrl +
+                       ", __levels);");
+  if (host.kind == HostOp::kZero) {
+    line(indent + 1, "dma_wait_idle(1u << " + queue + ");");
+  }
+  line(indent, "}");
+  return true;
+}
+
+void CEmitter::emit_mailbox_request(const voyager::Operation& op,
+                                    const voyager::PrimOp& prim, size_t ordinal,
+                                    int indent) {
   const HostOp& host = host_table_.at(ordinal);
   const std::string ord = std::to_string(ordinal) + "ULL";
   if (host.kind == HostOp::kZero) {
@@ -1858,6 +2001,12 @@ std::string CEmitter::emit_layer(const Model::Selection& selection,
   bounded_ = &selection.bounded;
   lowered_ = &selection.lowered;
   max_tiles_ = getenv_int("MAX_TILES", 0);
+  const char* hw_dma = std::getenv("HW_DMA");
+  hw_dma_ = hw_dma != nullptr && std::string(hw_dma) == "true";
+  counter_queues_.clear();
+  dma_lowered_ = 0;
+  dma_transposed_ = 0;
+  dma_fallbacks_ = 0;
   // Survives the survey walk; everything else is rebuilt by it.
   concrete_env_.clear();
 
@@ -1901,7 +2050,7 @@ std::string CEmitter::emit_layer(const Model::Selection& selection,
   if (survey) {
     survey = false;
     for (const auto* op : selection.ops) {
-      if (cond_guards_dispatch(*op)) {
+      if (cond_guards_dispatch(*op, hw_dma_)) {
         survey = true;
         break;
       }
@@ -1921,11 +2070,20 @@ std::string CEmitter::emit_layer(const Model::Selection& selection,
     surveying_ = false;
   }
   walk();
+  if (hw_dma_) {
+    std::cerr << "[DMA] " << layer << ": " << dma_lowered_ << " lowered ("
+              << dma_transposed_ << " transposed), " << dma_fallbacks_
+              << " on the mailbox" << std::endl;
+  }
 
   std::ostringstream out;
   out << "#include <stddef.h>\n";
   out << "#include <stdint.h>\n";
   out << "#include <stdio.h>\n\n";
+  if (hw_dma_) {
+    out << "#include \"dma.h\"\n";
+    out << "#include \"encoding.h\"\n";
+  }
   out << "#include \"host_request.h\"\n";
   out << "#include \"mmio.h\"\n";
   out << "#include \"patch_bits.h\"\n";
@@ -1936,6 +2094,8 @@ std::string CEmitter::emit_layer(const Model::Selection& selection,
   out << "int main() {\n";
   out << "\tenable_interrupts();\n";
   out << "\thost_init();\n\n";
+  // A DMA layer reports its wall time, from here to the end of its body.
+  if (hw_dma_) out << "\tconst uint64_t __layer_start = read_csr(mcycle);\n";
   out << "\treg_write64(VOYAGER_BASE_ADDR, SRAM_BASE);\n";
   out << "\tint64_t " << kIntraOpPosts << ";\n\n";
 
@@ -1965,6 +2125,10 @@ std::string CEmitter::emit_layer(const Model::Selection& selection,
   // it posted, so the units and the copies are done when the body returns.
   out << intra_reset;
   out << body_.str();
+  if (hw_dma_) {
+    out << "\tconst uint64_t __layer_cycles = read_csr(mcycle) - "
+           "__layer_start;\n";
+  }
   out << "\n\tprintf(\"All params sent!\\n\");\n\n";
   // The testbench grades the outputs before the firmware goes on to exit.
   out << "\thost_finish();\n\n";
@@ -1979,6 +2143,22 @@ std::string CEmitter::emit_layer(const Model::Selection& selection,
   out << "\tprintf(\"MVM Unit Runtime        : %lu cycles\\n\", "
          "reg_read64(MVM_UNIT_CYCLE_COUNT));\n";
 #endif
+  // Before the runtime line, which ends a run_voyager.py-driven simulation.
+  if (hw_dma_) {
+    out << "\tprintf(\"Layer Runtime           : %lu cycles\\n\", "
+           "__layer_cycles);\n";
+    out << "#ifdef HW_DMA\n";
+    out << "\tprintf(\"DMA Pushes              : %lu, %lu cycles\\n\", "
+           "dma_pushes, dma_push_cycles);\n";
+    out << "\tprintf(\"DMA Busy                : load %lu, store %lu "
+           "cycles\\n\", reg_read64(DMA_LOAD_BUSY_CYCLES), "
+           "reg_read64(DMA_STORE_BUSY_CYCLES));\n";
+    out << "\tprintf(\"Wait Stall              : matrix %lu, vector %lu, mvm "
+           "%lu cycles\\n\", reg_read64(WAIT_STALL_CYCLES(0)), "
+           "reg_read64(WAIT_STALL_CYCLES(1)), "
+           "reg_read64(WAIT_STALL_CYCLES(2)));\n";
+    out << "#endif\n";
+  }
   out << "\tprintf(\"Accelerator Runtime     : %lu cycles\\n\", "
          "reg_read64(ACCELERATOR_CYCLE_COUNT));\n";
   out << "}\n";

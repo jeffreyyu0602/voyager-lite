@@ -9,6 +9,7 @@
 
 #include "runtime/GraphUtils.h"
 #include "runtime/Model.h"
+#include "soc/emitter/DMALowering.h"
 #include "soc/emitter/HostRequests.h"
 
 // Emits one layer's bufferized program as C for the control processor.
@@ -26,6 +27,13 @@
 // 1 to the copy's counter once the transfer has landed. Built with
 // NO_TESTBENCH (full JTAG mode, the chip) the image is preloaded and
 // host_copy adds the 1 itself; the emitted C is the same.
+//
+// For a DRAM config (HW_DMA set at generation) every copy and zero fill
+// that lowers to a DMA descriptor (DMALowering.h) is also emitted as a push
+// onto the wrapper's DMA engine, under #ifdef HW_DMA; the mailbox request
+// stays in the #else arm, so the same C builds either way. A copy that does
+// not lower waits for the DMA queues to drain, then takes the mailbox, so
+// the copies on its counter still land in order.
 //
 // A dispatch's params are serialized once at generation time with the
 // iteration-0 scalar environment and embedded as static byte arrays. Fields
@@ -109,12 +117,26 @@ class CEmitter {
   void emit_host_request(const voyager::Operation& op,
                          const voyager::PrimOp& prim, size_t ordinal,
                          int indent);
+  // The mailbox request of a host-table prim (emit_host_request's #else arm
+  // in a DMA layer).
+  void emit_mailbox_request(const voyager::Operation& op,
+                            const voyager::PrimOp& prim, size_t ordinal,
+                            int indent);
+  // A copy's or zero fill's DMA push, or the drain before its mailbox
+  // fallback; logs which. Returns whether it lowered.
+  bool emit_dma_request(const voyager::Operation& op,
+                        const voyager::PrimOp& prim, size_t ordinal,
+                        int indent);
 
-  bool contains_dispatch(const voyager::Operation& op) const;
+  // With `requests`, a copy or zero fill counts as a dispatch: its DMA
+  // lowering, like a dispatch's params, needs an environment the program
+  // reaches.
+  bool contains_dispatch(const voyager::Operation& op,
+                         bool requests = false) const;
   // Anything the firmware emits code for: a dispatch, a request, a counter
   // operation, bookkeeping. A loop with none is not emitted.
   bool contains_work(const voyager::Operation& op) const;
-  bool cond_guards_dispatch(const voyager::Operation& op) const;
+  bool cond_guards_dispatch(const voyager::Operation& op, bool requests) const;
 
   // Concrete iteration-0 evaluation, mirroring the Interpreter's scalar
   // semantics; keeps env_ valid so dispatch sites can be probed.
@@ -179,4 +201,14 @@ class CEmitter {
   // The commit whose waits and post the next dispatch emitted must carry;
   // null outside a commit body and once the dispatch has taken them.
   const voyager::Operation* pending_commit_ = nullptr;
+
+  // HW_DMA at generation: copies and zero fills become DMA pushes.
+  bool hw_dma_ = false;
+  // The queue each copy counter's copies go to: all on one queue, so they
+  // land in issue order.
+  std::map<int64_t, int> counter_queues_;
+  // This layer's lowering tally, for the report.
+  int dma_lowered_ = 0;
+  int dma_transposed_ = 0;
+  int dma_fallbacks_ = 0;
 };
