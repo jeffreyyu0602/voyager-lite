@@ -641,8 +641,9 @@ def main():
         )
 
     # BANK_WIDTH here describes the SoC SRAM row width for the testbench's VPI
-    # backdoor addressing (SoCMemory) — the compiler-side --bank_width is now
-    # computed by the accelerator's codegen.mk and no longer injected from here.
+    # backdoor addressing (SoCMemory) — the compiler-side
+    # --scratchpad_word_bytes is now computed by the accelerator's codegen.mk
+    # and no longer injected from here.
     min_unroll = min(int(env_vars["IC_DIMENSION"]), int(env_vars["OC_DIMENSION"]))
     bank_width = int(datatype_width * min_unroll / 8)
 

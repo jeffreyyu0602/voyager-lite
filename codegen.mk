@@ -14,14 +14,14 @@ NUM_BANKS ?= 16
 BYTE_BANK_WIDTH := $(OC_DIMENSION)
 NIBBLE_BANK_WIDTH := $(shell expr $(OC_DIMENSION) / 2)
 
-E4M3_FLAGS := --activation fp8_e4m3 --weight fp8_e4m3 --bf16 --bank_width $(BYTE_BANK_WIDTH)
-P8_1_FLAGS := --activation posit8_1 --weight posit8_1 --bf16 --bank_width $(BYTE_BANK_WIDTH)
-INT8_FLAGS := --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_tensor_symmetric --bias int24 --bf16 --calibration_steps 3 --bank_width $(BYTE_BANK_WIDTH)
-INT8_32_FLAGS := --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_tensor_symmetric --bias int32 --bf16 --calibration_steps 3 --bank_width $(BYTE_BANK_WIDTH)
+E4M3_FLAGS := --activation fp8_e4m3 --weight fp8_e4m3 --bf16 --scratchpad_word_bytes $(BYTE_BANK_WIDTH)
+P8_1_FLAGS := --activation posit8_1 --weight posit8_1 --bf16 --scratchpad_word_bytes $(BYTE_BANK_WIDTH)
+INT8_FLAGS := --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_tensor_symmetric --bias int24 --bf16 --calibration_steps 3 --scratchpad_word_bytes $(BYTE_BANK_WIDTH)
+INT8_32_FLAGS := --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_tensor_symmetric --bias int32 --bf16 --calibration_steps 3 --scratchpad_word_bytes $(BYTE_BANK_WIDTH)
 BLOCK_SIZE := $(shell [ $(IC_DIMENSION) -gt $(OC_DIMENSION) ] && echo $(IC_DIMENSION) || echo $(OC_DIMENSION))
-MXINT8_FLAGS := --activation int8,qs=microscaling,bs=$(BLOCK_SIZE),pot=1 --weight int8,qs=microscaling,bs=$(BLOCK_SIZE),pot=1 --bf16 --bank_width $(BYTE_BANK_WIDTH)
-MXNF4_FLAGS := --activation lut4_to_int6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --weight lut4_to_int6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --bf16 --residual fp8_e4m3 --quantize_fc --bank_width $(NIBBLE_BANK_WIDTH)
-COMMON_FLAGS := --tensor_layout nhwc --gemm_layout "xc,ck->xk" --pe_array_size $(IC_DIMENSION),$(OC_DIMENSION) --dump_tensors --double_buffered_l2 --scratchpad_size $(SCRATCHPAD_SIZE) --scratchpad_offset $(SCRATCHPAD_OFFSET) --num_banks $(NUM_BANKS) --input_buffer_size $(INPUT_BUFFER_SIZE) --weight_buffer_size $(WEIGHT_BUFFER_SIZE) --accum_buffer_size $(ACCUM_BUFFER_SIZE)
+MXINT8_FLAGS := --activation int8,qs=microscaling,bs=$(BLOCK_SIZE),pot=1 --weight int8,qs=microscaling,bs=$(BLOCK_SIZE),pot=1 --bf16 --scratchpad_word_bytes $(BYTE_BANK_WIDTH)
+MXNF4_FLAGS := --activation lut4_to_int6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --weight lut4_to_int6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --bf16 --residual fp8_e4m3 --quantize_fc --scratchpad_word_bytes $(NIBBLE_BANK_WIDTH)
+COMMON_FLAGS := --tensor_layout nhwc --gemm_layout "xc,ck->xk" --pe_array_size $(IC_DIMENSION),$(OC_DIMENSION) --dump_tensors --double_buffered_l2 --scratchpad_size $(SCRATCHPAD_SIZE) --scratchpad_offset $(SCRATCHPAD_OFFSET) --scratchpad_banks $(NUM_BANKS) --input_buffer_size $(INPUT_BUFFER_SIZE) --weight_buffer_size $(WEIGHT_BUFFER_SIZE) --accum_buffer_size $(ACCUM_BUFFER_SIZE)
 EXTRA_COMPILER_FLAGS ?=
 
 CONTEXT ?= 1024

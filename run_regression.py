@@ -496,9 +496,9 @@ def run_accuracy(model, dataset, num_processes, output_folder):
         raise ValueError("Invalid datatype")
 
     if env_vars["DATATYPE"] == "MXNF4":
-        quantization_args += ["--bank_width", str(oc_unroll // 2)]
+        quantization_args += ["--scratchpad_word_bytes", str(oc_unroll // 2)]
     elif env_vars["DATATYPE"] not in ("CFLOAT", "BF16"):
-        quantization_args += ["--bank_width", str(oc_unroll)]
+        quantization_args += ["--scratchpad_word_bytes", str(oc_unroll)]
 
     # Keep in sync with codegen.mk's COMMON_FLAGS.
     common_flags = [
@@ -512,7 +512,7 @@ def run_accuracy(model, dataset, num_processes, output_folder):
         "--double_buffered_l2",
         "--scratchpad_size",
         env_vars.get("SCRATCHPAD_SIZE", "2097152"),
-        "--num_banks",
+        "--scratchpad_banks",
         env_vars.get("NUM_BANKS", "16"),
         "--input_buffer_size",
         env_vars["INPUT_BUFFER_SIZE"],
