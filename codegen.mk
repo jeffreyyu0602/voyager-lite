@@ -33,9 +33,14 @@ ifneq ($(filter true 1,$(DOUBLE_BUFFERED_ACCUM_BUFFER)),)
 COMMON_FLAGS += --double_buffered_accum_buffer
 endif
 
+# FREQUENCY (GHz) is the clock the compiler's cost model assumes. It defaults
+# to 1 / CLOCK_PERIOD (ns); set it when the chip runs at a different clock
+# than the one the RTL is synthesized for.
 ifdef CLOCK_PERIOD
-# CLOCK_PERIOD is in ns; the compiler's cost model takes frequency in GHz.
-COMMON_FLAGS += --frequency $(shell awk 'BEGIN { print 1.0 / $(CLOCK_PERIOD) }')
+FREQUENCY ?= $(shell awk 'BEGIN { print 1.0 / $(CLOCK_PERIOD) }')
+endif
+ifdef FREQUENCY
+COMMON_FLAGS += --frequency $(FREQUENCY)
 endif
 
 ifeq ($(CONV2D_IM2COL),1)
