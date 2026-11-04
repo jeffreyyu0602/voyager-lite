@@ -48,13 +48,27 @@ class Model {
   // that must be preloaded from tensor_files before a walk.
   std::vector<const voyager::TensorBox*> resident_inputs() const;
 
+  // How a graded buffer is read and which part of it is graded, as the IR
+  // that writes it says.
+  struct Grading {
+    // The elements the writes cover when every write goes through a window at
+    // fixed offsets; empty when some write reaches the whole buffer.
+    std::vector<uint8_t> window;
+    // The buffer holds codebook indices: the last output of an op that casts
+    // through an output_code, or a copy of one. Its integer dtype only stores
+    // the index bits.
+    bool code_index = false;
+  };
+
   // DRAM buffers `ops` reads before writing (live_in, to preload) and the
   // gradable buffers it writes (live_out): DRAM boxes plus, when
-  // include_scratchpad is set, scratchpad results.
+  // include_scratchpad is set, scratchpad results, each with its Grading in
+  // `grading`.
   void live_sets(const std::vector<const voyager::Operation*>& ops,
                  std::vector<const voyager::TensorBox*>* live_in,
                  std::vector<const voyager::TensorBox*>* live_out,
-                 bool include_scratchpad = false) const;
+                 bool include_scratchpad = false,
+                 std::map<std::string, Grading>* grading = nullptr) const;
 
   void print_summary() const;
 

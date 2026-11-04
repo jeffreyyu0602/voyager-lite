@@ -67,6 +67,7 @@ void load_tensor(const Tensor& tensor, const std::string& data_dir,
 }
 
 int compare_memories(const std::vector<const voyager::TensorBox*>& expected,
+                     const std::map<std::string, Model::Grading>& grading,
                      const Model& model, ArrayMemory* first,
                      const std::string& first_name, ArrayMemory* second,
                      const std::string& second_name, const std::string& out_dir,
@@ -91,8 +92,27 @@ int compare_memories(const std::vector<const voyager::TensorBox*>& expected,
     // A run bounded by MAX_TILES only fills part of each buffer. Grade the part
     // it filled; the rest was never computed.
     std::vector<uint8_t> valid = valid_mask(tensor, first);
-    if (require_complete &&
-        std::find(valid.begin(), valid.end(), 0) != valid.end()) {
+
+    static const Model::Grading whole;
+    const auto found = grading.find(tensor.node);
+    const Model::Grading& grade =
+        found == grading.end() ? whole : found->second;
+
+    // A buffer written only through fixed windows, such as a cache filled in
+    // place, is graded inside them; the rest is no output of this selection.
+    const std::vector<uint8_t>& window = grade.window;
+    bool complete = true;
+    for (size_t i = 0; i < valid.size(); i++) {
+      const bool wanted = window.empty() || window[i];
+      if (wanted && !valid[i]) complete = false;
+      if (!wanted) valid[i] = 0;
+    }
+    if (!window.empty()) {
+      const auto inside = std::count(window.begin(), window.end(), 1);
+      spdlog::info("{}: grading the {} of {} elements its windows cover\n",
+                   tensor.node, inside, window.size());
+    }
+    if (require_complete && !complete) {
       spdlog::error("{} did not write all of {}\n", SIM_LABELS.at(first_name),
                     tensor.node);
       missing_coverage = true;
@@ -115,7 +135,7 @@ int compare_memories(const std::vector<const voyager::TensorBox*>& expected,
     const std::any second_values = second->read_tensor(tensor);
     long diff = compare_arrays<SUPPORTED_TYPES>(
         tensor, first_values, first_name, second_values, second_name, filename,
-        valid, rtol, atol);
+        valid, rtol, atol, grade.code_index);
 
     spdlog::info("{} {}: mismatched {}\n", tensor.node, shape_str(tensor.shape),
                  diff);

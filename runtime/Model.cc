@@ -168,6 +168,44 @@ std::set<const voyager::Operation*> unfinished_tile_stores(
   return dropped;
 }
 
+// Is this a window at fixed offsets into an unbanked buffer? Only such a
+// window bounds where its writer can land before the run.
+bool is_fixed_window(const voyager::TensorBoxRef& ref) {
+  if (ref.offsets_size() == 0 || banks_of(ref.box()) > 1) return false;
+  return std::all_of(ref.offsets().begin(), ref.offsets().end(),
+                     [](const voyager::ScalarValue& offset) {
+                       return offset.has_int_value();
+                     });
+}
+
+// Marks the elements a fixed window covers in a mask over its whole buffer,
+// indexed row-major over the window's source shape.
+void mark_window(const voyager::TensorBoxRef& ref, std::vector<uint8_t>* mask) {
+  const int rank = ref.sizes_size();
+  std::vector<int64_t> pitch(rank, 1);
+  for (int d = rank - 2; d >= 0; d--) {
+    pitch[d] = pitch[d + 1] * ref.box().shape(d + 1);
+  }
+
+  std::vector<int64_t> index(rank, 0);
+  while (true) {
+    int64_t flat = 0;
+    for (int d = 0; d < rank; d++) {
+      flat +=
+          (ref.offsets(d).int_value() + index[d] * ref.strides(d)) * pitch[d];
+    }
+    if (flat < 0 || flat >= static_cast<int64_t>(mask->size())) {
+      throw std::runtime_error("A window of " + ref.box().node() +
+                               " reaches past its buffer");
+    }
+    (*mask)[flat] = 1;
+
+    int d = rank - 1;
+    while (d >= 0 && ++index[d] == ref.sizes(d)) index[d--] = 0;
+    if (d < 0) break;
+  }
+}
+
 }  // namespace
 
 Model::Model(const std::string& model_name) {
@@ -422,9 +460,22 @@ std::vector<const voyager::TensorBox*> Model::resident_inputs() const {
 void Model::live_sets(const std::vector<const voyager::Operation*>& ops,
                       std::vector<const voyager::TensorBox*>* live_in,
                       std::vector<const voyager::TensorBox*>* live_out,
-                      bool include_scratchpad) const {
+                      bool include_scratchpad,
+                      std::map<std::string, Grading>* grading) const {
   std::set<std::string> read;
   std::set<std::string> written;
+  // The fixed windows each buffer is written through, and the buffers some
+  // write reaches whole or at a runtime offset.
+  std::map<std::string, std::vector<const voyager::TensorBoxRef*>> fixed;
+  std::set<std::string> unbounded;
+  std::set<std::string> code_indices;
+  const auto record = [&](const voyager::TensorBoxRef& ref) {
+    if (is_fixed_window(ref)) {
+      fixed[ref.box().node()].push_back(&ref);
+    } else {
+      unbounded.insert(ref.box().node());
+    }
+  };
   // A scratchpad buffer a DMA writes into is a staged input or weight tile,
   // not a compute result, so it is never gradable.
   std::set<std::string> copy_dests;
@@ -449,18 +500,35 @@ void Model::live_sets(const std::vector<const voyager::Operation*>& ops,
         if (is_copy && key == "dst") {
           copy_dests.insert(node);
           written.insert(node);
+          record(arg.tensor_box());
+          const auto& src = ::arg(*prim, "src").tensor_box().box();
+          if (code_indices.count(src.node()) != 0) code_indices.insert(node);
         } else if (is_zeros) {
           written.insert(node);
+          record(arg.tensor_box());
         } else if (!written.count(node)) {
           read.insert(node);
         }
       }
     }
+    // The gold model casts an op's last output through its output_code.
+    const auto prims = get_prim_ops(op);
+    const bool coded = std::any_of(
+        prims.begin(), prims.end(),
+        [](const auto* prim) { return has_arg(*prim, "output_code"); });
+    if (coded && op.outputs_size() > 0 &&
+        op.outputs(op.outputs_size() - 1).has_destination()) {
+      code_indices.insert(
+          op.outputs(op.outputs_size() - 1).destination().box().node());
+    }
+
     for (const auto& output : op.outputs()) {
       if (output.has_destination()) {
         written.insert(output.destination().box().node());
+        record(output.destination());
       } else if (output.has_tensor_box()) {
         written.insert(output.tensor_box().node());
+        unbounded.insert(output.tensor_box().node());
       }
     }
 
@@ -500,7 +568,16 @@ void Model::live_sets(const std::vector<const voyager::Operation*>& ops,
       } else if (include_scratchpad && partition_of(b) == SRAM_PARTITION &&
                  copy_dests.count(node) == 0) {
         live_out->push_back(&b);
+      } else {
+        continue;
       }
+
+      if (grading == nullptr) continue;
+      Grading& grade = (*grading)[node];
+      grade.code_index = code_indices.count(node) != 0;
+      if (unbounded.count(node) != 0) continue;
+      grade.window.assign(get_size(to_tensor(b)), 0);
+      for (const auto* ref : fixed.at(node)) mark_window(*ref, &grade.window);
     }
   }
 }

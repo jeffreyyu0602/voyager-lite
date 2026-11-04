@@ -60,7 +60,8 @@ Simulation::Simulation()
 
   partial_run = getenv_int("MAX_TILES", 0) > 0;
   check_all_writes = uses("gold") && uses("accelerator");
-  model.live_sets(selection.ops, &live_in, &live_out, check_all_writes);
+  model.live_sets(selection.ops, &live_in, &live_out, check_all_writes,
+                  &grading);
 }
 
 Simulation::~Simulation() {
@@ -192,7 +193,7 @@ int Simulation::check_outputs() {
       model_name + "." + (tests.empty() ? "all" : tests) + ".";
 
   const bool require_complete = !partial_run && uses("gold") && uses("pytorch");
-  return compare_memories(live_out, model, memory(ordered[0]), ordered[0],
-                          memory(ordered[1]), ordered[1], out_dir, prefix, rtol,
-                          atol, require_complete);
+  return compare_memories(live_out, grading, model, memory(ordered[0]),
+                          ordered[0], memory(ordered[1]), ordered[1], out_dir,
+                          prefix, rtol, atol, require_complete);
 }

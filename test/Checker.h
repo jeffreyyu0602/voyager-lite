@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,7 @@ void load_tensor(const Tensor& tensor, const std::string& data_dir,
 //
 // Each diff file is named "<prefix><tensor>.<first>_vs_<second>.txt".
 int compare_memories(const std::vector<const voyager::TensorBox*>& expected,
+                     const std::map<std::string, Model::Grading>& grading,
                      const Model& model, ArrayMemory* first,
                      const std::string& first_name, ArrayMemory* second,
                      const std::string& second_name, const std::string& out_dir,
@@ -52,7 +54,8 @@ template <typename T1, typename T2>
 long compare_arrays(std::any matrix_a, const std::string& name_a,
                     std::any matrix_b, const std::string& name_b, size_t size,
                     const std::string& filename,
-                    const std::vector<uint8_t>& valid, float rtol, float atol) {
+                    const std::vector<uint8_t>& valid, float rtol, float atol,
+                    bool code_index) {
   spdlog::info("Comparing {} and {} (size: {}) -> output: {}\n", name_a, name_b,
                size, filename);
 
@@ -87,6 +90,12 @@ long compare_arrays(std::any matrix_a, const std::string& name_a,
 
     float a = static_cast<float>(matrix_a_ptr[i]);
     float b = static_cast<float>(matrix_b_ptr[i]);
+    // A codebook index sits in the bits of a signed dtype: read it back as the
+    // unsigned index it is.
+    if (code_index) {
+      if (a < 0.0f) a += std::ldexp(1.0f, T1::width);
+      if (b < 0.0f) b += std::ldexp(1.0f, T2::width);
+    }
     sum_abs += std::abs(a) + std::abs(b);
     const float abs_diff = std::abs(a - b);
     const bool finite = std::isfinite(a) && std::isfinite(b);
@@ -190,11 +199,11 @@ bool compare_arrays_helper(const Tensor& tensor, const std::any& output1,
                            const std::string& name2,
                            const std::string& filename,
                            const std::vector<uint8_t>& valid, float rtol,
-                           float atol, long& mismatched) {
+                           float atol, bool code_index, long& mismatched) {
   if (tensor.dtype == DataTypes::TypeName<T>::name()) {
     mismatched +=
         compare_arrays<T, T>(output1, name1, output2, name2, get_size(tensor),
-                             filename, valid, rtol, atol);
+                             filename, valid, rtol, atol, code_index);
     return true;
   }
   return false;
@@ -204,7 +213,8 @@ template <typename... Ts>
 long compare_arrays(const Tensor& tensor, const std::any& output1,
                     const std::string& name1, const std::any& output2,
                     const std::string& name2, const std::string& filename,
-                    const std::vector<uint8_t>& valid, float rtol, float atol) {
+                    const std::vector<uint8_t>& valid, float rtol, float atol,
+                    bool code_index) {
   // Integer codes are graded in code units: under a tolerant profile a
   // single-LSB disagreement is rounding noise, not an error.
   if (atol > 0.0f && (tensor.dtype.rfind("int", 0) == 0 ||
@@ -213,10 +223,10 @@ long compare_arrays(const Tensor& tensor, const std::any& output1,
   }
 
   long mismatched = 0;
-  bool matched =
-      (compare_arrays_helper<Ts>(tensor, output1, name1, output2, name2,
-                                 filename, valid, rtol, atol, mismatched) ||
-       ...);
+  bool matched = (compare_arrays_helper<Ts>(tensor, output1, name1, output2,
+                                            name2, filename, valid, rtol, atol,
+                                            code_index, mismatched) ||
+                  ...);
 
   if (!matched) {
     throw std::runtime_error("Unsupported tensor dtype: " + tensor.dtype);
