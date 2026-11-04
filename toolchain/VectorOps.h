@@ -301,6 +301,13 @@ void map_vector_operations(const voyager::Operation& operation,
   if (input.window_pitch > 0) {
     vector_params->has_slicing = true;
 
+    // The fetch slices one last dimension; a run spanning whole rows (a
+    // partial outer dim) has no such slice.
+    if (input.window_run > 0 && input.window_run != input.shape.back()) {
+      throw std::invalid_argument(
+          "A pitched window whose run spans whole rows cannot be fetched by "
+          "the vector unit.");
+    }
     const int64_t col = input.window_col;
     const int64_t run = input.shape.back();
     if (col % OC_DIMENSION != 0 || run % OC_DIMENSION != 0) {

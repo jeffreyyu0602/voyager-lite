@@ -34,9 +34,11 @@ class MemoryInterface {
     const int partition = get_partition(tensor);
     const int64_t size = get_size(tensor);
 
-    // A pitched window gathers rows of `run` valid elements sitting `pitch`
+    // A pitched window gathers runs of `run` valid elements sitting `pitch`
     // elements apart; a contiguous tensor is the pitch == run case.
-    const int64_t run = tensor.window_pitch > 0 ? tensor.shape.back() : size;
+    const int64_t run = tensor.window_pitch == 0 ? size
+                        : tensor.window_run > 0 ? tensor.window_run
+                                                : tensor.shape.back();
     const int64_t pitch = tensor.window_pitch > 0 ? tensor.window_pitch : run;
     const int64_t span = size > 0 ? (size / run - 1) * pitch + run : 0;
 
@@ -142,11 +144,12 @@ class MemoryInterface {
     const int size = get_size(tensor);
     T* casted = std::any_cast<std::shared_ptr<T[]>&>(data).get();
 
-    // A pitched window scatters rows of `run` elements `pitch` apart; the
+    // A pitched window scatters runs of `run` elements `pitch` apart; the
     // bytes between the runs belong to the allocation, so read the span
     // back first and modify only the window.
     if (tensor.window_pitch > 0) {
-      const int64_t run = tensor.shape.back();
+      const int64_t run =
+          tensor.window_run > 0 ? tensor.window_run : tensor.shape.back();
       const int64_t pitch = tensor.window_pitch;
       const int64_t span = (size / run - 1) * pitch + run;
       const int64_t span_bytes = (span * T::width + 7) / 8;

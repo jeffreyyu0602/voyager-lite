@@ -1,6 +1,7 @@
 #include "runtime/GraphUtils.h"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 #include "spdlog/spdlog.h"
@@ -296,7 +297,8 @@ Tensor resolve_window(const voyager::TensorBoxRef& ref, const ScalarEnv& env,
   const std::vector<int64_t> strides = row_major_strides(dims);
   int64_t element_offset = 0;
   bool outer_seen = false;
-  bool pitched = false;
+  // The one partial dim inside the outermost non-unit one, if any.
+  int partial = -1;
   for (int d = 0; d < dims_rank; d++) {
     const int64_t offset = eval_int(ref.offsets(bank_dims + d), env);
     const int64_t size = ref.sizes(bank_dims + d);
@@ -306,12 +308,14 @@ Tensor resolve_window(const voyager::TensorBoxRef& ref, const ScalarEnv& env,
     element_offset += offset * strides[d];
 
     // Base + contiguous shape can express the window only if every dim
-    // inside the outermost non-unit one spans its whole extent. A partial
-    // innermost run alone is a pitched window: its rows sit a whole source
-    // row apart, which Tensor::window_pitch carries.
+    // inside the outermost non-unit one spans its whole extent. One partial
+    // dim with only whole dims after it is a pitched window: runs of that
+    // dim's size times the trailing dims' sit that dim's whole extent times
+    // the trailing dims apart, which Tensor::window_pitch carries. Two
+    // partial dims are a genuinely strided sub-window.
     if (outer_seen && size != dims[d]) {
-      if (d != dims_rank - 1) reject("strided sub-window");
-      pitched = true;
+      if (partial >= 0) reject("strided sub-window");
+      partial = d;
     }
     if (size > 1) outer_seen = true;
   }
@@ -324,15 +328,36 @@ Tensor resolve_window(const voyager::TensorBoxRef& ref, const ScalarEnv& env,
   }
   tensor.address += element_offset * width / 8;
 
-  if (pitched) {
-    const int64_t run = ref.sizes(rank - 1);
-    if (tensor.shape.empty() || tensor.shape.back() != run) {
-      reject("the view's shape does not end with the window's run");
+  if (partial >= 0) {
+    const int64_t inner = strides[partial];
+    const int64_t run = ref.sizes(bank_dims + partial) * inner;
+    const int64_t pitch = dims[partial] * inner;
+    if (tensor.shape.empty() || run % tensor.shape.back() != 0 ||
+        get_size(tensor.shape) % run != 0) {
+      reject("the view's shape does not tile the window's runs");
     }
-    tensor.window_pitch = dims[dims_rank - 1];
-    tensor.window_col = element_offset % dims[dims_rank - 1];
+    tensor.window_pitch = pitch;
+    tensor.window_col = element_offset % pitch;
+    tensor.window_run = run;
   }
   return tensor;
+}
+
+// The element of `tensor`'s allocation holding its logical element `index`:
+// itself, or for a pitched window, its run's start plus its place in the run.
+int64_t window_element(const Tensor& tensor, int64_t index) {
+  if (tensor.window_pitch == 0) return index;
+  const int64_t run =
+      tensor.window_run > 0 ? tensor.window_run : tensor.shape.back();
+  return (index / run) * tensor.window_pitch + index % run;
+}
+
+// How many logical elements from `index` on lie in one run of `tensor`.
+int64_t window_room(const Tensor& tensor, int64_t index) {
+  if (tensor.window_pitch == 0) return std::numeric_limits<int64_t>::max();
+  const int64_t run =
+      tensor.window_run > 0 ? tensor.window_run : tensor.shape.back();
+  return run - index % run;
 }
 
 std::vector<int64_t> arg_int64s(const voyager::PrimOp& prim,
@@ -348,6 +373,23 @@ std::vector<int64_t> arg_int64s(const voyager::PrimOp& prim,
 void copy_run(MemoryInterface* memory, const Tensor& src, int64_t src_index,
               const Tensor& dst, int64_t dst_index, int64_t count) {
   if (count <= 0) return;
+
+  // A pitched window's logical run is contiguous only within one of its
+  // runs: split it at their ends and address each piece in the allocation.
+  if (src.window_pitch > 0 || dst.window_pitch > 0) {
+    while (count > 0) {
+      const int64_t piece = std::min(
+          {count, window_room(src, src_index), window_room(dst, dst_index)});
+      Tensor src_flat = src, dst_flat = dst;
+      src_flat.window_pitch = dst_flat.window_pitch = 0;
+      copy_run(memory, src_flat, window_element(src, src_index), dst_flat,
+               window_element(dst, dst_index), piece);
+      src_index += piece;
+      dst_index += piece;
+      count -= piece;
+    }
+    return;
+  }
 
   const size_t width = get_width(src);
   const bool byte_aligned = (src_index * width) % 8 == 0 &&
@@ -375,8 +417,8 @@ void copy_run(MemoryInterface* memory, const Tensor& src, int64_t src_index,
 void fill_run(MemoryInterface* memory, const Tensor& dst, int64_t dst_index,
               int64_t count, float value) {
   for (int64_t i = 0; i < count; i++) {
-    memory->write_value(dst.partition, dst.address, dst_index + i, dst.dtype,
-                        value);
+    memory->write_value(dst.partition, dst.address,
+                        window_element(dst, dst_index + i), dst.dtype, value);
   }
 }
 
