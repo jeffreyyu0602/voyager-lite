@@ -60,7 +60,7 @@ void SoCSimulation::start() {
   const char* mailbox = std::getenv("HOST_MAILBOX");
   if (mailbox == nullptr) {
     throw std::runtime_error(
-        "HOST_MAILBOX is not set: run_voyager.py reads the firmware's "
+        "HOST_MAILBOX is not set: run_soc.py reads the firmware's "
         "host_mailbox symbol from the ELF and exports its address.");
   }
   mailbox_ = std::strtoull(mailbox, nullptr, 0);

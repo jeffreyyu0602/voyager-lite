@@ -2143,7 +2143,7 @@ std::string CEmitter::emit_layer(const Model::Selection& selection,
   out << "\tprintf(\"MVM Unit Runtime        : %lu cycles\\n\", "
          "reg_read64(MVM_UNIT_CYCLE_COUNT));\n";
 #endif
-  // Before the runtime line, which ends a run_voyager.py-driven simulation.
+  // Before the runtime line, which ends a run_soc.py-driven simulation.
   if (hw_dma_) {
     out << "\tprintf(\"Layer Runtime           : %lu cycles\\n\", "
            "__layer_cycles);\n";

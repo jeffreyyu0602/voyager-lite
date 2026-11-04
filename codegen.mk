@@ -50,40 +50,66 @@ endif
 ################################################################################
 # Networks
 #
-# One rule compiles any network. NETWORK names the output folder; these pick
-# what is compiled into it:
-#   MODE         compile_model.py's model, e.g. llama_prefill (default: NETWORK)
+# One rule compiles any network. NETWORK is the name a compiled program is
+# filed and tested under, networks/<NETWORK>/<DATATYPE>/; these pick what is
+# compiled into it:
+#   MODE         compile_model.py's model, e.g. clm (default: NETWORK)
+#   STAGE        the one stage of a causal LM (MODE=clm) to compile:
+#                prefill or decode
 #   CHECKPOINT   --model_name_or_path (default: the compiler's own)
 #   QCONFIG      --qconfig (default: none)
-#   SPEC_LENGTH  draft tokens of a llama_verify step (default: 14)
-# For example:
-#   make network-proto NETWORK=llama2_7b_decode_kivi MODE=llama_decode_kivi \
-#     CHECKPOINT=meta-llama/Llama-2-7b-hf QCONFIG=mxnf4_int6
+#   KV_CACHE     kivi: a decode's KV cache in KIVI's 2-bit format
+#   DECODE_TOKENS  positions a decode step writes at once; above one, a
+#                speculative-decoding verification step (default: one)
+#   WEIGHT_LAYOUT  how every program stores the linear weights, kc [out, in]
+#                or ck [in, out] (--weight_layout; default: the compiler's)
+# A network's settings live in ci/networks/<network>.env, KEY=VALUE per line,
+# and the drivers pass them on make's command line. For example:
+#   make network-proto NETWORK=llama2_7b_decode_kivi MODE=clm STAGE=decode \
+#     KV_CACHE=kivi CHECKPOINT=meta-llama/Llama-2-7b-hf
 ################################################################################
 MODE ?= $(NETWORK)
+STAGE ?=
 CHECKPOINT ?=
 QCONFIG ?=
-SPEC_LENGTH ?= 14
+KV_CACHE ?=
+DECODE_TOKENS ?=
 # A KIVI cache's full-precision residual chunk (the compiler requires it).
 RESIDUAL_LENGTH ?= 128
+WEIGHT_LAYOUT ?=
+
+ifeq ($(MODE),clm)
+ifeq ($(STAGE),)
+$(error MODE=clm compiles one STAGE (prefill or decode): set STAGE)
+endif
+endif
 
 NETWORK_FLAGS := \
-	$(if $(filter llama_%,$(MODE)),$(LLM_FLAGS)) \
-	$(if $(and $(filter llama_%,$(MODE)),$(filter MXNF4,$(DATATYPE))),$(LLM_MXNF4_FLAGS)) \
+	$(if $(filter clm,$(MODE)),--stage $(STAGE) $(LLM_FLAGS)) \
+	$(if $(and $(filter clm,$(MODE)),$(filter MXNF4,$(DATATYPE))),$(LLM_MXNF4_FLAGS)) \
 	$(if $(CHECKPOINT),--model_name_or_path $(CHECKPOINT)) \
 	$(if $(QCONFIG),--qconfig $(QCONFIG)) \
-	$(if $(filter %_kivi,$(MODE)),--residual_length $(RESIDUAL_LENGTH)) \
-	$(if $(filter llama_verify,$(MODE)),--spec_length $(SPEC_LENGTH))
+	$(if $(KV_CACHE),--kv_cache $(KV_CACHE) --residual_length $(RESIDUAL_LENGTH)) \
+	$(if $(DECODE_TOKENS),--decode_tokens $(DECODE_TOKENS)) \
+	$(if $(WEIGHT_LAYOUT),--weight_layout $(WEIGHT_LAYOUT))
 
 # A folder remembers what it was compiled as, so a NETWORK name reused with
 # other settings stops here instead of silently reusing the old compile.
 NETWORK_ARGS := $(strip $(MODE) $(NETWORK_FLAGS))
 NETWORK_RECORD := $(CODEGEN_DIR)/networks/$(NETWORK)/$(DATATYPE)/network_args.txt
+ifeq ($(filter print-compile-args,$(MAKECMDGOALS)),)
 ifneq ($(wildcard $(NETWORK_RECORD)),)
 ifneq ($(strip $(shell cat $(NETWORK_RECORD))),$(NETWORK_ARGS))
 $(error $(NETWORK_RECORD) was compiled as "$(strip $(shell cat $(NETWORK_RECORD)))", not "$(NETWORK_ARGS)": use another NETWORK name or move that folder aside)
 endif
 endif
+endif
+
+# The compile_model.py arguments the rule below passes, less the output
+# folder, for a driver that runs the compile itself (the accuracy flow).
+.PHONY: print-compile-args
+print-compile-args:
+	@echo '$(MODE) $($(DATATYPE)_FLAGS) $(EXTRA_COMPILER_FLAGS) $(COMMON_FLAGS) $(NETWORK_FLAGS)'
 
 $(CODEGEN_DIR)/networks/%/model.txt:
 	mkdir -p $(dir $@)

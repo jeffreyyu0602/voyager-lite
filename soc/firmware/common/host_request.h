@@ -102,7 +102,7 @@ static inline void host_op(volatile host_request_t* slot, uint64_t ordinal,
 }
 static inline void host_finish(void) {}
 #else
-/* The mailbox, in the firmware's .bss; run_voyager.py reads its address
+/* The mailbox, in the firmware's .bss; run_soc.py reads its address
  * from the ELF and hands it to the testbench as HOST_MAILBOX. */
 extern host_mailbox_t host_mailbox;
 
