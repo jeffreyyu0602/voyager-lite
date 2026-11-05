@@ -21,11 +21,11 @@ INT8_32_FLAGS := --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_
 BLOCK_SIZE := $(shell [ $(IC_DIMENSION) -gt $(OC_DIMENSION) ] && echo $(IC_DIMENSION) || echo $(OC_DIMENSION))
 MXINT8_FLAGS := --activation int8,qs=microscaling,bs=$(BLOCK_SIZE),pot=1 --weight int8,qs=microscaling,bs=$(BLOCK_SIZE),pot=1 --bf16 --scratchpad_word_bytes $(BYTE_BANK_WIDTH)
 MXNF4_FLAGS := --activation lut4_to_int6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --weight lut4_to_int6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --bf16 --residual fp8_e4m3 --quantize_fc --scratchpad_word_bytes $(NIBBLE_BANK_WIDTH)
-COMMON_FLAGS := --tensor_layout nhwc --gemm_layout "xc,ck->xk" --pe_array_size $(IC_DIMENSION),$(OC_DIMENSION) --dump_tensors --double_buffered_l2 --scratchpad_size $(SCRATCHPAD_SIZE) --scratchpad_offset $(SCRATCHPAD_OFFSET) --scratchpad_banks $(NUM_BANKS) --input_buffer_size $(INPUT_BUFFER_SIZE) --weight_buffer_size $(WEIGHT_BUFFER_SIZE) --accum_buffer_size $(ACCUM_BUFFER_SIZE)
+COMMON_FLAGS := --remove_fp32_casts --tensor_layout nhwc --gemm_layout "xc,ck->xk" --pe_array_size $(IC_DIMENSION),$(OC_DIMENSION) --dump_tensors --double_buffered_l2 --scratchpad_size $(SCRATCHPAD_SIZE) --scratchpad_offset $(SCRATCHPAD_OFFSET) --scratchpad_banks $(NUM_BANKS) --input_buffer_size $(INPUT_BUFFER_SIZE) --weight_buffer_size $(WEIGHT_BUFFER_SIZE) --accum_buffer_size $(ACCUM_BUFFER_SIZE)
 EXTRA_COMPILER_FLAGS ?=
 
 CONTEXT ?= 1024
-LLM_FLAGS := --context_length $(CONTEXT) --num_hidden_layers 1 --remove_fp32_casts
+LLM_FLAGS := --context_length $(CONTEXT) --num_hidden_layers 1
 # Only MXNF4's vector unit reads an int1 mask; MXINT8 keeps it bf16.
 LLM_MXNF4_FLAGS := --quantize_attention_mask --bool_mask
 
