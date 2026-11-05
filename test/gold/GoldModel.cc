@@ -191,6 +191,9 @@ std::vector<std::any> run_operation(const voyager::Operation& operation,
 #endif
       } else if (is_fc) {
         if (input.dtype == "bfloat16" || input.dtype == "float32") {
+          // The vector unit's GEMV reads every operand in its own type, the
+          // missing bias of a split-K round included.
+          if (!has_arg(op, "bias")) bias_ptr = std::shared_ptr<Vector[]>();
           output_ptr = gemv_bfloat16<Vector>(input_ptr, weight_ptr, bias_ptr,
                                              get_shape(weight));
         } else {
