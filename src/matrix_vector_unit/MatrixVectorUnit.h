@@ -20,7 +20,7 @@ template <typename... InputTypes, typename... WeightTypes, typename Input,
 struct MatrixVectorUnit<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
                         Input, Weight, Psum, Output, Scale, port_width, width,
                         bs, vu_width> : public sc_module {
-  static constexpr int LOOP_WIDTH = 16;
+  static constexpr int LOOP_WIDTH = MatrixParams::LOOP_WIDTH;
 
   sc_in<bool> CCS_INIT_S1(clk);
   sc_in<bool> CCS_INIT_S1(rstn);

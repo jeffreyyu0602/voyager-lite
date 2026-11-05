@@ -20,7 +20,7 @@ template <typename... InputTypes, typename... WeightTypes, typename Input,
 struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
                        Input, Weight, Psum, Buffer, Scale, rows, cols,
                        buffer_size> : public sc_module {
-  static constexpr int LOOP_WIDTH = 10;
+  static constexpr int LOOP_WIDTH = MatrixParams::LOOP_WIDTH;
   static constexpr int FIFO_DEPTH = SUPPORT_MX ? 8 : 1;
 
 #if DOUBLE_BUFFERED_ACCUM_BUFFER

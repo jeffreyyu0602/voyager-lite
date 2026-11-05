@@ -14,7 +14,7 @@ template <typename... WeightTypes, typename Bias, int rows, int cols,
           int port_width, int buffer_width>
 struct WeightController<std::tuple<WeightTypes...>, Bias, rows, cols,
                         port_width, buffer_width> : public sc_module {
-  static constexpr int LOOP_WIDTH = 10;
+  static constexpr int LOOP_WIDTH = MatrixParams::LOOP_WIDTH;
   static constexpr int DATA_WIDTH = buffer_width / cols;
   static constexpr int MAX_FETCH_WIDTH = std::max(
       {dtype_fetch_config<WeightTypes, cols, port_width>::max_fetch_width...});
