@@ -73,6 +73,9 @@ jobs:
     name: systemc (${{ matrix.config }})
     needs: setup
     runs-on: self-hosted
+    # The MXNF4 row's nine networks outlast the 6-hour default on a busy
+    # server.
+    timeout-minutes: 720
     env:
       CONV2D_IM2COL: 1
       CLOCK_PERIOD: 5
@@ -99,6 +102,7 @@ jobs:
     name: rtl (${{ matrix.config }})
     needs: setup
     runs-on: self-hosted
+    timeout-minutes: 720
     env:
       CONV2D_IM2COL: 1
       CLOCK_PERIOD: 5
