@@ -16,8 +16,11 @@ NIBBLE_BANK_WIDTH := $(shell expr $(OC_DIMENSION) / 2)
 
 E4M3_FLAGS := --activation fp8_e4m3 --weight fp8_e4m3 --bf16 --scratchpad_word_bytes $(BYTE_BANK_WIDTH)
 P8_1_FLAGS := --activation posit8_1 --weight posit8_1 --bf16 --scratchpad_word_bytes $(BYTE_BANK_WIDTH)
-INT8_FLAGS := --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_tensor_symmetric --bias int24 --bf16 --calibration_steps 3 --scratchpad_word_bytes $(BYTE_BANK_WIDTH)
-INT8_32_FLAGS := --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_tensor_symmetric --bias int32 --bf16 --calibration_steps 3 --scratchpad_word_bytes $(BYTE_BANK_WIDTH)
+# Samples the per-tensor INT8 scales are calibrated on; a handful leaves the
+# scales noisy.
+INT8_CALIBRATION_STEPS := 32
+INT8_FLAGS := --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_tensor_symmetric --bias int24 --bf16 --calibration_steps $(INT8_CALIBRATION_STEPS) --scratchpad_word_bytes $(BYTE_BANK_WIDTH)
+INT8_32_FLAGS := --activation int8,qs=per_tensor_symmetric --weight int8,qs=per_tensor_symmetric --bias int32 --bf16 --calibration_steps $(INT8_CALIBRATION_STEPS) --scratchpad_word_bytes $(BYTE_BANK_WIDTH)
 BLOCK_SIZE := $(shell [ $(IC_DIMENSION) -gt $(OC_DIMENSION) ] && echo $(IC_DIMENSION) || echo $(OC_DIMENSION))
 MXINT8_FLAGS := --activation int8,qs=microscaling,bs=$(BLOCK_SIZE),pot=1 --weight int8,qs=microscaling,bs=$(BLOCK_SIZE),pot=1 --bf16 --scratchpad_word_bytes $(BYTE_BANK_WIDTH)
 MXNF4_FLAGS := --activation lut4_to_int6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --weight lut4_to_int6,qs=microscaling,bs=$(BLOCK_SIZE),scale=fp8_e5m3 --bf16 --residual fp8_e4m3 --quantize_fc --scratchpad_word_bytes $(NIBBLE_BANK_WIDTH)
