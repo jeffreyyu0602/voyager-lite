@@ -399,9 +399,8 @@ T* get_param(const std::deque<BaseParams*>& params, int& index) {
 //
 // Inside a commit, the commit's waits on a unit go to the first group that
 // starts that unit -- "matrix" being the matrix-class units the params select:
-// the systolic array or the MVM, and the SpMM unit, each of which gets every
-// "matrix" wait -- and its post fires when its last group retires. A commit
-// around a DwC dispatch may carry neither.
+// the systolic array, the MVM or the DwC unit, and the SpMM unit, each of which
+// gets every "matrix" wait -- and its post fires when its last group retires.
 void Harness::dispatch_params(const voyager::Operation& op,
                               const std::deque<BaseParams*>& params) {
   auto timing = std::make_shared<OpTiming>();
@@ -412,7 +411,6 @@ void Harness::dispatch_params(const voyager::Operation& op,
   int idx = 0;
   while (idx < params.size()) {
     std::vector<Unit*> matrix_class;
-    std::vector<Unit*> unsynchronized;
     bool vector = false;
 
     if (auto* matrix_params = get_param<MatrixParams>(params, idx)) {
@@ -444,7 +442,7 @@ void Harness::dispatch_params(const voyager::Operation& op,
     } else if (auto* dwc_params = get_param<DwCParams>(params, idx)) {
 #if SUPPORT_DWC
       send_serialized_params<DwCParams, 64>(*dwc_params, &dwc_unit_params_in);
-      unsynchronized.push_back(&dwc_unit_queue);
+      matrix_class.push_back(&dwc_unit_queue);
 #else
       throw std::runtime_error("DWC support is not enabled.");
 #endif
@@ -471,12 +469,6 @@ void Harness::dispatch_params(const voyager::Operation& op,
       Commit& commit = *open_commit;
       commit.groups++;
       commit.groups_left++;
-      const bool synchronized = commit.sync.post || !commit.sync.waits.empty();
-      if (synchronized && !unsynchronized.empty()) {
-        throw std::runtime_error(commit.sync.op +
-                                 ": a wait or a post on a DwC dispatch, "
-                                 "which takes neither.");
-      }
       for (const auto& wait : commit.sync.waits) {
         if (wait.unit == "matrix") {
           if (!matrix_class.empty() && !commit.matrix_waits_taken) {
@@ -498,9 +490,6 @@ void Harness::dispatch_params(const voyager::Operation& op,
 
     std::vector<std::pair<Unit*, std::vector<CounterWait>>> passes;
     for (Unit* unit : matrix_class) passes.emplace_back(unit, matrix_waits);
-    for (Unit* unit : unsynchronized) {
-      passes.emplace_back(unit, std::vector<CounterWait>{});
-    }
     if (vector) passes.emplace_back(&vector_unit_queue, vector_waits);
     if (passes.empty()) {
       throw std::runtime_error(op.name() + ": params entry " +
