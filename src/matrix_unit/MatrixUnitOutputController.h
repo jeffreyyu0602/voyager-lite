@@ -63,7 +63,7 @@ SC_MODULE(MatrixUnitOutputController) {
 
   Connections::SyncOut CCS_INIT_S1(done);
 
-  static constexpr int LOOP_WIDTH = 16;
+  static constexpr int LOOP_WIDTH = MatrixParams::LOOP_WIDTH;
 
   SC_CTOR(MatrixUnitOutputController) {
 #if DOUBLE_BUFFERED_ACCUM_BUFFER

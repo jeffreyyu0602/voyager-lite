@@ -10,6 +10,7 @@
 #include "test/gold/Microscaling.h"
 #include "test/gold/Pooling.h"
 #include "test/gold/QuantizeOps.h"
+#include "test/gold/RMSNorm.h"
 #include "test/gold/Reduction.h"
 #include "test/gold/ReshapeOps.h"
 #include "test/gold/SlicingOp.h"
@@ -190,6 +191,9 @@ std::vector<std::any> run_operation(const voyager::Operation& operation,
 #endif
       } else if (is_fc) {
         if (input.dtype == "bfloat16" || input.dtype == "float32") {
+          // The vector unit's GEMV reads every operand in its own type, the
+          // missing bias of a split-K round included.
+          if (!has_arg(op, "bias")) bias_ptr = std::shared_ptr<Vector[]>();
           output_ptr = gemv_bfloat16<Vector>(input_ptr, weight_ptr, bias_ptr,
                                              get_shape(weight));
         } else {
@@ -251,6 +255,8 @@ std::vector<std::any> run_operation(const voyager::Operation& operation,
               op, env);
     } else if (target == "layer_norm") {
       output_ptr = layer_norm<Vector>(kwargs, op, env);
+    } else if (target == "rms_norm") {
+      output_ptr = rms_norm<Vector>(kwargs, op, env);
     } else if (target == "softmax") {
       output_ptr = softmax<Vector>(kwargs, op, env);
     } else if (target == "calculate_mx_qparam") {
@@ -486,7 +492,31 @@ void run_host_operation(const voyager::Operation& operation,
     if (strip_namespace(prim.target()) == "add") {
       const int64_t alpha =
           has_arg(prim, "alpha") ? arg_int(prim, "alpha", env) : 1;
-      const int64_t addend = alpha * arg_int(prim, "other", env);
+      // `other` is a scalar, or a one-element on-chip tensor (a value
+      // computed at run time) the CPU reads.
+      int64_t other = 0;
+      if (prim.kwargs().at("other").has_tensor_box()) {
+        const Tensor cell = resolve(prim, "other", env);
+        if (get_size(cell) != 1) {
+          throw std::runtime_error(operation.name() +
+                                   ": other is not one element.");
+        }
+        std::any value = memory->read_tensor(cell);
+        if (auto* v =
+                std::any_cast<std::shared_ptr<DataTypes::int32[]>>(&value)) {
+          other = (*v)[0].int_val.to_int64();
+        } else if (auto* v =
+                       std::any_cast<std::shared_ptr<DataTypes::int64[]>>(
+                           &value)) {
+          other = (*v)[0].int_val.to_int64();
+        } else {
+          throw std::runtime_error(operation.name() +
+                                   ": other is not an index dtype.");
+        }
+      } else {
+        other = arg_int(prim, "other", env);
+      }
+      const int64_t addend = alpha * other;
       if (auto* values =
               std::any_cast<std::shared_ptr<DataTypes::int32[]>>(&data)) {
         for (int i = 0; i < get_size(src); i++) {

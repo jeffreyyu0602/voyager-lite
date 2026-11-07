@@ -4,8 +4,8 @@
 #include <string>
 #include <vector>
 
-#include "runtime/Model.h"
 #include "build/codegen/proto/voyager_ir.pb.h"
+#include "runtime/Model.h"
 
 // The host-request table: the prims of a layer's program that the firmware
 // asks the SoC testbench to perform (host_request.h), numbered by one walk
@@ -25,6 +25,11 @@ struct HostOp {
 // run-time values. Both sides must build it from the same Selection (same
 // TESTS and MAX_TILES).
 std::vector<HostOp> enumerate_host_ops(const Model::Selection& selection);
+
+// The box a voyager::zeros writes: its tensor operand, or, for a zeros that
+// declares its buffer, the declared box. A counter (register level) resets;
+// anything else is a zero fill. Null when the op names no box.
+const voyager::TensorBox* zeros_target(const voyager::Operation& op);
 
 // Every scalar SSA name an operation's operands reference: window offsets,
 // scalar kwargs, scalar-list entries, destination offsets. The firmware

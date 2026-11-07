@@ -9,7 +9,7 @@
 template <typename VectorType, typename BufferType, int width, int mu_width,
           typename... InputTypes>
 SC_MODULE(VectorFetchUnit) {
-  static constexpr int LOOP_WIDTH = 11;
+  static constexpr int LOOP_WIDTH = VectorParams::LOOP_WIDTH;
   static constexpr int MAX_BUFSIZE =
       1024 / mu_width < mu_width ? 1024 / mu_width : mu_width;
   static constexpr int BUFSIZE = width < MAX_BUFSIZE ? width : MAX_BUFSIZE;
@@ -584,7 +584,7 @@ SC_MODULE(VectorFetchUnit) {
     while (true) {
       VectorParams params = vector_fetch_1_data_params.Pop();
 
-      ac_int<16, false> innermost_loop_reuse = 0;
+      ac_int<LOOP_WIDTH, false> innermost_loop_reuse = 0;
       if (params.vector_fetch_1_broadcast[2] &&
           params.vector_fetch_1_k_loop_idx[1] == 2) {
         innermost_loop_reuse = params.vector_fetch_1_loops[1][2] - 1;
@@ -596,7 +596,7 @@ SC_MODULE(VectorFetchUnit) {
         ac_int<MAX_RESPONSE_WIDTH, false> bits =
             vector_fetch_1_packed_bits.Pop();
 
-        for (ac_int<16, false> count = 0;; count++) {
+        for (ac_int<LOOP_WIDTH, false> count = 0;; count++) {
           for (ac_int<4, false> i = 0;; i++) {
             Pack1D<VectorType, width> outputs;
             bool found = (unpack_vector_data<InputTypes, VectorType, width,
@@ -757,7 +757,7 @@ SC_MODULE(VectorFetchUnit) {
     while (true) {
       VectorParams params = vector_fetch_2_data_params.Pop();
 
-      ac_int<16, false> innermost_loop_reuse = 0;
+      ac_int<LOOP_WIDTH, false> innermost_loop_reuse = 0;
       if (params.vector_fetch_2_broadcast[2] &&
           params.vector_fetch_2_k_loop_idx[1] == 2) {
         innermost_loop_reuse = params.vector_fetch_2_loops[1][2] - 1;
@@ -768,7 +768,7 @@ SC_MODULE(VectorFetchUnit) {
       while (!vector_fetch_2_data_done.read()) {
         ac_int<MAX_RESPONSE_WIDTH, false> bits =
             vector_fetch_2_packed_bits.Pop();
-        for (ac_int<16, false> count = 0;; count++) {
+        for (ac_int<LOOP_WIDTH, false> count = 0;; count++) {
           for (ac_int<4, false> i = 0;; i++) {
             Pack1D<VectorType, width> outputs;
             bool found = (unpack_vector_data<InputTypes, VectorType, width,

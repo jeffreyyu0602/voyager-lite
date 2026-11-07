@@ -22,7 +22,7 @@ have it generate the `compile_commands.json`. For example, to generate
 DATATYPE=MXINT8 IC_DIMENSION=32 OC_DIMENSION=32 compiledb make TestRunner
 ```
 
-Please refer to `run_regression.py` for the exact `make` commands for different
+Please refer to `run_accelerator.py` for the exact `make` commands for different
 targets.
 
 The environment variables provided affect how clangd parses your code and

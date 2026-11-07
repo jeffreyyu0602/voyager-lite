@@ -53,14 +53,15 @@ Simulation::Simulation()
   model.print_summary();
 
   // TESTS names a layer; its layers.txt extent is the smallest runnable thing
-  // and is self-contained (allocs, credit fills, tile loop, drain), so the
-  // selection runs as-is.
+  // and is self-contained (allocs, counter resets, tile loop, epilogue), so
+  // the selection runs as-is.
   selection = model.selected_ops(split(getenv("TESTS", ""), ','));
   spdlog::info("Running {} top-level operation(s)\n", selection.ops.size());
 
   partial_run = getenv_int("MAX_TILES", 0) > 0;
   check_all_writes = uses("gold") && uses("accelerator");
-  model.live_sets(selection.ops, &live_in, &live_out, check_all_writes);
+  model.live_sets(selection.ops, &live_in, &live_out, check_all_writes,
+                  &grading);
 }
 
 Simulation::~Simulation() {
@@ -134,6 +135,7 @@ void Simulation::run_gold() {
   GoldBackend backend(array);
   Interpreter interpreter(model, array, &backend);
   interpreter.run(selection);
+  interpreter.log_counters();
 
   const std::string name = getenv("TESTS", model_name);
 
@@ -191,7 +193,7 @@ int Simulation::check_outputs() {
       model_name + "." + (tests.empty() ? "all" : tests) + ".";
 
   const bool require_complete = !partial_run && uses("gold") && uses("pytorch");
-  return compare_memories(live_out, model, memory(ordered[0]), ordered[0],
-                          memory(ordered[1]), ordered[1], out_dir, prefix, rtol,
-                          atol, require_complete);
+  return compare_memories(live_out, grading, model, memory(ordered[0]),
+                          ordered[0], memory(ordered[1]), ordered[1], out_dir,
+                          prefix, rtol, atol, require_complete);
 }

@@ -89,7 +89,7 @@ hf auth login
 - `/test`: the SystemC testbench, its test runners, the output checkers and the gold model (`gold/`)
 - `/runtime`: loads a compiled network and runs it: the graph, interpreter, tensors and memory model
 - `/toolchain`: tiles each compiled operation and maps it onto accelerator parameters
-- `/soc`: Chipyard integration: the Chisel wrapper (`src/`), the firmware emitter, firmware, JTAG tools and `run_voyager.py`
+- `/soc`: Chipyard integration: the Chisel wrapper (`src/`), the firmware emitter, firmware, JTAG tools and `run_soc.py`
 - `/ci`: CI hardware configs, per-network compile settings and the layer skip list
 - `/lib`: External libraries and dependencies required by the project
 - `/models`: Pre-trained DNN model weights used for verification and evaluation
@@ -97,7 +97,7 @@ hf auth login
 - `/voyager-compiler`: the compiler that turns PyTorch models into accelerator programs
 - `build/` (generated): HLS output and objects per hardware config; `build/codegen` holds the compiled networks
 - `Makefile`: Build configuration for compiling the SystemC source code
-- `run_regression.py`: Main regression testing script that orchestrates accuracy evaluation, functional simulations, and RTL generation
+- `run_accelerator.py`: Main regression testing script that orchestrates accuracy evaluation, functional simulations, and RTL generation
 
 
 ## Usage
@@ -117,12 +117,12 @@ Additional variables for RTL generation:
 - **`CLOCK_PERIOD`**: Target clock period in nanoseconds for RTL synthesis
 - **`TECHNOLOGY`**: Technology name (must match a `.tcl` file in `scripts/tech/`)
 
-The `run_regression.py` script is the main entry point for running various types of evaluations and simulations, including:
+The `run_accelerator.py` script is the main entry point for running various types of evaluations and simulations, including:
 - Accuracy evaluation on full models and datasets
 - Functional SystemC simulations for verification
 - Cycle-accurate RTL simulations after HLS synthesis
 
-For detailed information about available options and underlying steps, refer to the script's help message: `python run_regression.py --help`. Upon completion, results and log files are generated in the `regression_results/latest/` directory.
+For detailed information about available options and underlying steps, refer to the script's help message: `python run_accelerator.py --help`. Upon completion, results and log files are generated in the `regression_results/latest/` directory.
 
 ### Running Accuracy Evaluation
 
@@ -139,7 +139,7 @@ Accuracy evaluation runs inference on full models and datasets to measure the im
 
 **Example:** To evaluate the accuracy of an INT8 16×16 systolic array accelerator on the ResNet-18 model using the ImageNet dataset with 32 parallel processes:
 ```bash
-DATATYPE=INT8 IC_DIMENSION=16 OC_DIMENSION=16 python run_regression.py --models resnet18 --dataset imagenet --sims accuracy --num_processes 32
+DATATYPE=INT8 IC_DIMENSION=16 OC_DIMENSION=16 python run_accelerator.py --models resnet18 --dataset imagenet --sims accuracy --num_processes 32
 ```
 
 ### Running Functional SystemC Simulations
@@ -150,7 +150,7 @@ This is typically the first verification step before proceeding to RTL generatio
 
 **Example:** To verify an E4M3 32×32 accelerator on ResNet-18 and MobileBERT layers:
 ```bash
-DATATYPE=E4M3 IC_DIMENSION=32 OC_DIMENSION=32 python run_regression.py --models resnet18,mobilebert_encoder --sims systemc --num_processes 32
+DATATYPE=E4M3 IC_DIMENSION=32 OC_DIMENSION=32 python run_accelerator.py --models resnet18,mobilebert_encoder --sims systemc --num_processes 32
 ```
 
 ### Running HLS and Cycle-Accurate RTL Simulations
@@ -180,7 +180,7 @@ proc get_memory_name {is_sp depth width} {
 
 **Example:** To run RTL generation on an INT8 32x32 accelerator with a 5.0ns clock period using the `generic` technology and evaluate runtime on MobileBERT:
 ```bash
-DATATYPE=INT8 IC_DIMENSION=32 OC_DIMENSION=32 CLOCK_PERIOD=5.0 TECHNOLOGY=generic python run_regression.py --models mobilebert_encoder --sims rtl --num_processes 32 --uniquify_layers
+DATATYPE=INT8 IC_DIMENSION=32 OC_DIMENSION=32 CLOCK_PERIOD=5.0 TECHNOLOGY=generic python run_accelerator.py --models mobilebert_encoder --sims rtl --num_processes 32 --uniquify_layers
 ```
 
 The `--uniquify_layers` flag can be used to reduce the evaluation runtime by only running the layers with unique shapes.

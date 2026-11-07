@@ -30,6 +30,10 @@ class Interpreter {
   // Runs the selection's top-level operations in order.
   void run(const Model::Selection& selection);
 
+  // Logs the final value of every counter the walk reset: the counts the
+  // oracle checks against the kernel's expected totals.
+  void log_counters() const;
+
   // Cycles the accelerator would need for the whole walk if it never stalled.
   //
   // Accumulated as the walk dispatches, so a tile loop multiplies it up by
@@ -54,13 +58,12 @@ class Interpreter {
   void execute_scalar(const voyager::Operation& op,
                       const voyager::PrimOp& prim);
   void execute_zeros(const voyager::Operation& op, const voyager::PrimOp& prim);
-  void execute_fill(const voyager::Operation& op, const voyager::PrimOp& prim);
-  void execute_async_wait(const voyager::PrimOp& prim);
   void execute_async(const voyager::Operation& op,
                      const voyager::AsyncOp& async);
 
-  int64_t resolve_semaphore_slot(const voyager::TensorBoxRef& ref,
-                                 const std::string& op_name);
+  // A wait's threshold, lowered by the stores a mid-tile cut dropped from
+  // its counter (Model::Selection::lowered).
+  int64_t eval_threshold(const voyager::ScalarValue& value) const;
 
   // Dispatch an accelerator operation, charging its ideal cycles to its layer.
   void dispatch(const voyager::Operation& op);
@@ -72,6 +75,11 @@ class Interpreter {
   ScalarEnv env_;
   int loop_depth_ = 0;
   bool bound_current_top_ = true;
+  // The running selection's lowered thresholds; null outside run().
+  const std::map<const voyager::ScalarValue*, int64_t>* lowered_ = nullptr;
   long matrix_cycles_ = 0;
   long vector_cycles_ = 0;
+
+  // The counters the walk reset, by id, with the node that declared each.
+  std::map<int64_t, std::string> counters_;
 };

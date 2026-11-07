@@ -67,7 +67,7 @@ void set_vector_fetch_1(const Tensor& tensor, std::vector<int> output_shape,
         input_shape[i] == 1 && output_shape[i] != 1;
   }
 
-  const int dtype = get_index_from_type_name<VU_INPUT_TYPES>(tensor.dtype);
+  const int dtype = hw_dtype_index<VU_INPUT_TYPES>(tensor.dtype, "read");
   const int dtype_width = get_type_width<VU_INPUT_TYPES>(dtype);
   const int fetch_width = OC_DIMENSION * dtype_width;
 
@@ -113,7 +113,7 @@ void set_vector_fetch_2(const Tensor& tensor, std::vector<int> output_shape,
     vector_params->vector_fetch_2_broadcast[i] = input_shape[i] == 1;
   }
 
-  const int dtype = get_index_from_type_name<VU_INPUT_TYPES>(tensor.dtype);
+  const int dtype = hw_dtype_index<VU_INPUT_TYPES>(tensor.dtype, "read");
   const int dtype_width = get_type_width<VU_INPUT_TYPES>(dtype);
   const int fetch_width = OC_DIMENSION * dtype_width;
 
@@ -301,6 +301,13 @@ void map_vector_operations(const voyager::Operation& operation,
   if (input.window_pitch > 0) {
     vector_params->has_slicing = true;
 
+    // The fetch slices one last dimension; a run spanning whole rows (a
+    // partial outer dim) has no such slice.
+    if (input.window_run > 0 && input.window_run != input.shape.back()) {
+      throw std::invalid_argument(
+          "A pitched window whose run spans whole rows cannot be fetched by "
+          "the vector unit.");
+    }
     const int64_t col = input.window_col;
     const int64_t run = input.shape.back();
     if (col % OC_DIMENSION != 0 || run % OC_DIMENSION != 0) {
@@ -407,7 +414,7 @@ void map_vector_operations(const voyager::Operation& operation,
     packing_factor = 1;
   }
 
-  const int dtype = get_index_from_type_name<VU_INPUT_TYPES>(input.dtype);
+  const int dtype = hw_dtype_index<VU_INPUT_TYPES>(input.dtype, "read");
   const int dtype_width = get_type_width<VU_INPUT_TYPES>(dtype);
   const int fetch_width = data_stride * dtype_width;
 
@@ -469,7 +476,7 @@ void map_vector_operations(const voyager::Operation& operation,
   }
 
   vector_params->output_dtype =
-      get_index_from_type_name<OUTPUT_DATATYPES>(output.dtype);
+      hw_dtype_index<OUTPUT_DATATYPES>(output.dtype, "write");
 
   // Set input broadcasting based on output shape
   if (!vector_params->has_permute && !vector_params->has_slicing &&

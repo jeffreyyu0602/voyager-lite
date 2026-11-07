@@ -191,13 +191,27 @@ trait HasWriteInterface extends Module with HasPortWidth {
     val data        = Flipped(DecoupledIO(UInt(dataBits.W)))
     val baseAddress = Input(UInt(64.W))
   })
+
+  // The write path's progress, when counted.
+  def writeCounts: Option[WriteCounts]
 }
 
+// A write interface's progress, each count from reset: the words whose Puts
+// have all issued, the Puts issued, and the Puts acknowledged.
+class WriteCounts extends Bundle {
+  val words = UInt(32.W)
+  val puts  = UInt(32.W)
+  val acks  = UInt(32.W)
+}
+
+// countAcks adds writeCounts, for the write-acknowledged posts of a DMA
+// config.
 class TLFullWriteInterface(
   name:       String,
   dataWidth:  Int,
   fifoDepth:  Int,
   maxFlight:  Int,
+  countAcks:  Boolean,
 )(
   implicit p: Parameters)
     extends LazyModule {
@@ -272,6 +286,22 @@ class TLFullWriteInterface(
 
     when(tl.a.fire) {
       sourceId := sourceId + 1.U
+    }
+
+    val writeCounts = if (countAcks) Some(IO(Output(new WriteCounts))) else None
+    writeCounts.foreach { out =>
+      val words = RegInit(0.U(32.W))
+      val puts  = RegInit(0.U(32.W))
+      val acks  = RegInit(0.U(32.W))
+      // A word has issued with its last Put: the second part of an unaligned
+      // one.
+      val wordEnd = isSecondPart || !(addrOffset =/= 0.U && secondPartSize =/= 0.U)
+      when(tl.a.fire && wordEnd) { words := words + 1.U }
+      when(tl.a.fire) { puts := puts + 1.U }
+      when(tl.d.fire) { acks := acks + 1.U }
+      out.words := words
+      out.puts  := puts
+      out.acks  := acks
     }
   }
 }

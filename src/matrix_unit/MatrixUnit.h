@@ -31,9 +31,9 @@ SC_MODULE(MatrixUnit) {
   static constexpr int ACCUM_BUFFER_BANKS = 1;
 #endif
 
-  MatrixParamsDeserializer<0, PARAMS_MODULE_COUNT> CCS_INIT_S1(
-      params_deserializer);
+  MatrixParamsDeserializer<0, 1> CCS_INIT_S1(params_deserializer);
   Connections::In<ac_int<64, false>> CCS_INIT_S1(serial_params_in);
+  Connections::Combinational<MatrixParams> CCS_INIT_S1(params_in);
   Connections::Combinational<MatrixParams> matrix_params[PARAMS_MODULE_COUNT];
 
   InputController<InputTypeList, IC_DIMENSION, IC_PORT_WIDTH,
@@ -150,9 +150,11 @@ SC_MODULE(MatrixUnit) {
     params_deserializer.clk(clk);
     params_deserializer.rstn(rstn);
     params_deserializer.serial_params_in(serial_params_in);
-    for (int i = 0; i < PARAMS_MODULE_COUNT; i++) {
-      params_deserializer.params_out[i](matrix_params[i]);
-    }
+    params_deserializer.params_out[0](params_in);
+
+    SC_THREAD(send_params);
+    sensitive << clk.pos();
+    async_reset_signal_is(rstn, false);
 
     input_controller.clk(clk);
     input_controller.rstn(rstn);
@@ -237,7 +239,6 @@ SC_MODULE(MatrixUnit) {
     matrix_processor.weight_channel(weight_buffer_read_resp);
     matrix_processor.bias_channel(bias_data);
     matrix_processor.params_in(matrix_params[2]);
-    matrix_processor.start(start);
 
     for (int i = 0; i < ACCUM_BUFFER_BANKS; i++) {
       matrix_processor.accumulation_buffer_read_address[i](
@@ -303,5 +304,27 @@ SC_MODULE(MatrixUnit) {
     output_controller.matrix_unit_output_data(output_data);
     output_controller.matrix_unit_output_addr(output_addr);
     output_controller.done(done);
+  }
+
+  // A pass raises start before its params reach the fetchers: the wrapper
+  // grants it once the pass's counter waits hold, so no fetch runs ahead of
+  // the data it reads.
+  void send_params() {
+    params_in.ResetRead();
+    for (int i = 0; i < PARAMS_MODULE_COUNT; i++) {
+      matrix_params[i].ResetWrite();
+    }
+    start.Reset();
+
+    wait();
+
+    while (true) {
+      const MatrixParams params = params_in.Pop();
+      start.SyncPush();
+#pragma hls_unroll yes
+      for (int i = 0; i < PARAMS_MODULE_COUNT; i++) {
+        matrix_params[i].Push(params);
+      }
+    }
   }
 };

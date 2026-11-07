@@ -13,7 +13,7 @@ struct InputController;
 template <typename... InputTypes, int rows, int port_width, int buffer_width>
 struct InputController<std::tuple<InputTypes...>, rows, port_width,
                        buffer_width> : public sc_module {
-  static constexpr int LOOP_WIDTH = 10;
+  static constexpr int LOOP_WIDTH = MatrixParams::LOOP_WIDTH;
   static constexpr int DATA_WIDTH = buffer_width / rows;
   static constexpr int MAX_FETCH_WIDTH = std::max(
       {dtype_fetch_config<InputTypes, rows, port_width>::max_fetch_width...});
@@ -122,10 +122,10 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
           params.loops[0][params.reduction_loop_idx[0]];
       ac_int<LOOP_WIDTH, false> C1 =
           params.loops[1][params.reduction_loop_idx[1]];
-      ac_int<16, false> Y0 = params.loops[1][params.y_loop_idx[1]];
-      ac_int<16, false> X0 = params.loops[1][params.x_loop_idx[1]];
-      ac_int<4, false> FX = params.loops[1][params.fx_loop_idx];
-      ac_int<4, false> FY0 = params.loops[1][params.fy_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> Y0 = params.loops[1][params.y_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> X0 = params.loops[1][params.x_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> FX = params.loops[1][params.fx_loop_idx];
+      ac_int<LOOP_WIDTH, false> FY0 = params.loops[1][params.fy_loop_idx[1]];
       ac_int<8, false> STRIDE = params.stride;
 
       if (params.is_resnet_replication) {
@@ -309,10 +309,10 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
       ac_int<LOOP_WIDTH, false> X1 = params.loops[0][params.x_loop_idx[0]];
       ac_int<LOOP_WIDTH, false> C1 =
           params.loops[1][params.reduction_loop_idx[1]];
-      ac_int<16, false> Y0 = params.loops[1][params.y_loop_idx[1]];
-      ac_int<16, false> X0 = params.loops[1][params.x_loop_idx[1]];
-      ac_int<4, false> FX = params.loops[1][params.fx_loop_idx];
-      ac_int<4, false> FY0 = params.loops[1][params.fy_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> Y0 = params.loops[1][params.y_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> X0 = params.loops[1][params.x_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> FX = params.loops[1][params.fx_loop_idx];
+      ac_int<LOOP_WIDTH, false> FY0 = params.loops[1][params.fy_loop_idx[1]];
       ac_int<8, false> STRIDE = params.stride;
 
       if (params.is_resnet_replication) {
@@ -502,8 +502,8 @@ struct InputController<std::tuple<InputTypes...>, rows, port_width,
       ac_int<LOOP_WIDTH, false> X0 = params.loops[1][params.x_loop_idx[1]];
       ac_int<LOOP_WIDTH, false> C1 =
           params.loops[1][params.reduction_loop_idx[1]];
-      ac_int<4, false> FX = params.loops[1][params.fx_loop_idx];
-      ac_int<4, false> FY0 = params.loops[1][params.fy_loop_idx[1]];
+      ac_int<LOOP_WIDTH, false> FX = params.loops[1][params.fx_loop_idx];
+      ac_int<LOOP_WIDTH, false> FY0 = params.loops[1][params.fy_loop_idx[1]];
       ac_int<8, false> STRIDE = params.stride;
 
       bool is_downsample = FX == 1 && FY0 == 1;

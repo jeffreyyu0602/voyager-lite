@@ -6,5 +6,6 @@ runs:
     - name: Fetch Submodules and LFS
       shell: bash
       run: |
+        git submodule sync --recursive
         git submodule update --init --recursive
         GIT_LFS_SKIP_SMUDGE=1 git lfs pull --exclude="voyager-compiler/**"

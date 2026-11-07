@@ -1,13 +1,31 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
-#include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
-#include <utility>
+#include <vector>
 
 #include "runtime/GraphUtils.h"
 #include "build/codegen/proto/voyager_ir.pb.h"
+
+// One wait a dispatch's pass starts behind: on `unit`, counter >= threshold.
+struct CounterWait {
+  std::string unit;  // "matrix" (systolic array or MVM) or "vector"
+  int64_t counter = 0;
+  int64_t threshold = 0;
+  std::string node;  // the counter's node name, for messages
+};
+
+// A commit's synchronization: its waits, grouped by unit, and at most one
+// post, which the dispatch's last pass adds 1 to when it completes.
+struct CommitSync {
+  std::string op;  // the commit's name, for messages
+  std::vector<CounterWait> waits;
+  std::optional<int64_t> post;
+  std::string post_node;
+};
 
 // Where the interpreter hands an operation to whatever is actually computing.
 //
@@ -23,37 +41,52 @@ class Backend {
   // `op` is a prim or a fusion whose targets run on the accelerator.
   virtual void execute(const voyager::Operation& op, const ScalarEnv& env) = 0;
 
-  // --- Semaphore protocol -------------------------------------------------
+  // --- Counters -----------------------------------------------------------
   //
-  // The interpreter resolves a semaphore TensorBoxRef to a (node, slot) and
-  // drives its counter through these three. A slot is a bank for a scalar
-  // semaphore and a flattened [bank, *dims] for a semaphore array; either way
-  // it is only ever a key, never interpreted. The default is a plain integer
-  // counter, which is exactly right for the sequential backends (gold, params):
-  // the walk always reaches a wait after the op that posts it, so a wait never
-  // blocks.
+  // NUM_COUNTERS count-up counters, keyed by id as in the hardware. They start
+  // at zero (the reset state), voyager::zeros resets one, a copy adds 1 when
+  // it has landed, a commit's last pass adds 1 to its post, and a wait holds
+  // once the counter has reached its threshold. Nothing ever decrements.
   //
-  // The SystemC Harness overrides these with a blocking, cross-thread counting
-  // semaphore, because there a `commit` retires on a second thread and a wait
-  // can reach the interpreter before that thread has posted.
-  virtual void init_semaphore(const std::string& node, int64_t slot,
-                              int64_t value) {
-    semaphores_[{node, slot}] = value;
+  // The defaults are the sequential semantics, right for the gold model: the
+  // walk reaches a wait only after the ops that satisfy it, so a wait that
+  // does not hold is a compiler bug, and the oracle fails on it. The SystemC
+  // Harness overrides the waits with blocking ones, because there a commit
+  // retires on another thread and the walk can reach a wait first.
+  virtual void reset_counter(int64_t id, const std::string& node) {
+    counters_[id] = 0;
+    counter_nodes_[id] = node;
   }
-  virtual void post_semaphore(const std::string& node, int64_t slot,
-                              int64_t amount) {
-    semaphores_[{node, slot}] += amount;
+  virtual void add_counter(int64_t id) { counters_[id]++; }
+  virtual void wait_counter(int64_t id, int64_t threshold,
+                            const std::string& op) {
+    if (counters_[id] < threshold) throw wait_failure(op, "", id, threshold);
   }
-  virtual void wait_semaphore(const std::string& node, int64_t slot,
-                              int64_t amount) {
-    int64_t& count = semaphores_.at({node, slot});
-    if (count < amount) {
-      throw std::runtime_error(
-          "Semaphore " + node + " slot " + std::to_string(slot) +
-          " was waited before it was posted: the walk reached the wait before "
-          "the op that signals it.");
+  int64_t counter(int64_t id) const { return counters_[id]; }
+
+  // --- Committed (async) regions ------------------------------------------
+  //
+  // A `commit` dispatches a region asynchronously so a matrix tile's ramp-up
+  // (input/weight load, array fill) can overlap the previous tile's ramp-down
+  // (output drain). Each of its waits gates one unit's pass; its post is
+  // added by the last pass. Sequential backends have nothing to overlap, so
+  // the default is fully synchronous: begin_commit checks that every wait
+  // already holds, the body's ops flow through execute() exactly as top-level
+  // ops do, and end_commit adds the post.
+  //
+  // The Harness instead attaches the waits to the passes the body dispatches
+  // and adds the post when the last of them retires.
+  virtual void begin_commit(const CommitSync& sync) {
+    for (const auto& wait : sync.waits) {
+      if (counters_[wait.counter] < wait.threshold) {
+        throw wait_failure(sync.op, wait.unit, wait.counter, wait.threshold);
+      }
     }
-    count -= amount;
+    commit_post_ = sync.post;
+  }
+  virtual void end_commit() {
+    if (commit_post_) add_counter(*commit_post_);
+    commit_post_.reset();
   }
 
   // --- Data-movement interception -----------------------------------------
@@ -64,8 +97,8 @@ class Backend {
   // program in place -- the SoC schedule recorder, which replays these
   // effects into the DUT's scratchpad later -- overrides
   // intercepts_data_ops() and receives each such op through data_op()
-  // instead of the interpreter touching memory. Semaphore accounting is not
-  // affected: posts and waits already flow through the backend.
+  // instead of the interpreter touching memory. Counter accounting is not
+  // affected: adds and waits already flow through the backend.
   virtual bool intercepts_data_ops() const { return false; }
   virtual void data_op(const voyager::Operation& op,
                        const voyager::PrimOp& prim, const ScalarEnv& env) {}
@@ -85,26 +118,23 @@ class Backend {
   virtual void scalar_op(const voyager::Operation& op,
                          const voyager::PrimOp& prim, const ScalarEnv& env) {}
 
-  // --- Committed (async) regions ------------------------------------------
-  //
-  // A `commit` dispatches a region asynchronously so a matrix tile's ramp-up
-  // (input/weight load, array fill) can overlap the previous tile's ramp-down
-  // (output drain). Sequential backends have nothing to overlap, so the default
-  // is fully synchronous: the interpreter waits the dependencies, runs the body
-  // in place -- begin/end are no-ops, so the body's ops flow through execute()
-  // exactly as top-level ops do -- and end_commit posts.
-  //
-  // The Harness overrides is_committed_async() to true; the interpreter still
-  // walks the body identically, but the Harness routes the body's matrix op to
-  // the datapath immediately (ramp-up) inside execute(), while deferring the
-  // tail and the post to a completion thread it drains in end_commit().
-  virtual bool is_committed_async() const { return false; }
-  virtual void begin_commit() {}
-  virtual void end_commit(bool has_post, const std::string& post_node,
-                          int64_t post_slot, int64_t post_amount) {
-    if (has_post) post_semaphore(post_node, post_slot, post_amount);
+ protected:
+  // The oracle's verdict on a wait that does not hold: the op, the unit (empty
+  // for a CPU wait), the counter, its value and the threshold.
+  std::runtime_error wait_failure(const std::string& op,
+                                  const std::string& unit, int64_t id,
+                                  int64_t threshold) const {
+    const std::string where = unit.empty() ? "" : unit + " ";
+    return std::runtime_error(
+        op + ": " + where + "wait on counter " + counter_nodes_[id] + " (id " +
+        std::to_string(id) + ") does not hold: value " +
+        std::to_string(counters_[id]) + " < threshold " +
+        std::to_string(threshold) + ".");
   }
 
- protected:
-  std::map<std::pair<std::string, int64_t>, int64_t> semaphores_;
+  std::array<int64_t, NUM_COUNTERS> counters_{};
+  std::array<std::string, NUM_COUNTERS> counter_nodes_{};
+
+ private:
+  std::optional<int64_t> commit_post_;
 };

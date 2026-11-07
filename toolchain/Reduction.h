@@ -27,7 +27,7 @@ void map_reducer_op(const voyager::Operation& operation, const ScalarEnv& env,
   VectorInstructionConfig* vector_instruction_config =
       new VectorInstructionConfig;
 
-  int input_dtype = get_index_from_type_name<VU_INPUT_TYPES>(input.dtype);
+  int input_dtype = hw_dtype_index<VU_INPUT_TYPES>(input.dtype, "read");
   int input_dtype_width = get_type_width<VU_INPUT_TYPES>(input_dtype);
   int input_fetch_width = OC_DIMENSION * input_dtype_width;
 
@@ -71,7 +71,7 @@ void map_reducer_op(const voyager::Operation& operation, const ScalarEnv& env,
   }
 
   vector_params->output_dtype =
-      get_index_from_type_name<OUTPUT_DATATYPES>(output.dtype);
+      hw_dtype_index<OUTPUT_DATATYPES>(output.dtype, "write");
 
   VectorInstructions inst0;
   inst0.op_type = VectorInstructions::reduction;

@@ -1,6 +1,7 @@
 #include "runtime/GraphUtils.h"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 #include "spdlog/spdlog.h"
@@ -71,8 +72,22 @@ std::string strip_namespace(const std::string& target) {
 // Tensor boxes
 // ===========================================================================
 
-bool is_semaphore(const voyager::TensorBox& box) {
+bool is_counter(const voyager::TensorBox& box) {
   return box.memory().level() == voyager::MEMORY_LEVEL_REGISTER;
+}
+
+int64_t counter_id(const voyager::TensorBox& box) {
+  if (!is_counter(box)) {
+    throw std::runtime_error("TensorBox " + box.node() +
+                             " is not a counter (not at register level).");
+  }
+  const int64_t id = static_cast<int64_t>(box.memory().address());
+  if (id < 0 || id >= NUM_COUNTERS) {
+    throw std::runtime_error("Counter " + box.node() + " has id " +
+                             std::to_string(id) + "; the hardware has " +
+                             std::to_string(NUM_COUNTERS) + " counters.");
+  }
+  return id;
 }
 
 bool is_constant(const voyager::TensorBox& box) {
@@ -113,7 +128,7 @@ Tensor to_tensor(const voyager::TensorBox& box, int64_t bank) {
   tensor.node = box.node();
   tensor.shape.assign(box.shape().begin(), box.shape().end());
   tensor.dtype = box.dtype();
-  tensor.partition = is_semaphore(box) ? DRAM_PARTITION : partition_of(box);
+  tensor.partition = partition_of(box);
   tensor.address = box.memory().address() + bank * bank_stride_of(box);
   tensor.materialized = true;
   tensor.is_constant = is_constant(box);
@@ -282,7 +297,8 @@ Tensor resolve_window(const voyager::TensorBoxRef& ref, const ScalarEnv& env,
   const std::vector<int64_t> strides = row_major_strides(dims);
   int64_t element_offset = 0;
   bool outer_seen = false;
-  bool pitched = false;
+  // The one partial dim inside the outermost non-unit one, if any.
+  int partial = -1;
   for (int d = 0; d < dims_rank; d++) {
     const int64_t offset = eval_int(ref.offsets(bank_dims + d), env);
     const int64_t size = ref.sizes(bank_dims + d);
@@ -292,12 +308,14 @@ Tensor resolve_window(const voyager::TensorBoxRef& ref, const ScalarEnv& env,
     element_offset += offset * strides[d];
 
     // Base + contiguous shape can express the window only if every dim
-    // inside the outermost non-unit one spans its whole extent. A partial
-    // innermost run alone is a pitched window: its rows sit a whole source
-    // row apart, which Tensor::window_pitch carries.
+    // inside the outermost non-unit one spans its whole extent. One partial
+    // dim with only whole dims after it is a pitched window: runs of that
+    // dim's size times the trailing dims' sit that dim's whole extent times
+    // the trailing dims apart, which Tensor::window_pitch carries. Two
+    // partial dims are a genuinely strided sub-window.
     if (outer_seen && size != dims[d]) {
-      if (d != dims_rank - 1) reject("strided sub-window");
-      pitched = true;
+      if (partial >= 0) reject("strided sub-window");
+      partial = d;
     }
     if (size > 1) outer_seen = true;
   }
@@ -310,15 +328,36 @@ Tensor resolve_window(const voyager::TensorBoxRef& ref, const ScalarEnv& env,
   }
   tensor.address += element_offset * width / 8;
 
-  if (pitched) {
-    const int64_t run = ref.sizes(rank - 1);
-    if (tensor.shape.empty() || tensor.shape.back() != run) {
-      reject("the view's shape does not end with the window's run");
+  if (partial >= 0) {
+    const int64_t inner = strides[partial];
+    const int64_t run = ref.sizes(bank_dims + partial) * inner;
+    const int64_t pitch = dims[partial] * inner;
+    if (tensor.shape.empty() || run % tensor.shape.back() != 0 ||
+        get_size(tensor.shape) % run != 0) {
+      reject("the view's shape does not tile the window's runs");
     }
-    tensor.window_pitch = dims[dims_rank - 1];
-    tensor.window_col = element_offset % dims[dims_rank - 1];
+    tensor.window_pitch = pitch;
+    tensor.window_col = element_offset % pitch;
+    tensor.window_run = run;
   }
   return tensor;
+}
+
+// The element of `tensor`'s allocation holding its logical element `index`:
+// itself, or for a pitched window, its run's start plus its place in the run.
+int64_t window_element(const Tensor& tensor, int64_t index) {
+  if (tensor.window_pitch == 0) return index;
+  const int64_t run =
+      tensor.window_run > 0 ? tensor.window_run : tensor.shape.back();
+  return (index / run) * tensor.window_pitch + index % run;
+}
+
+// How many logical elements from `index` on lie in one run of `tensor`.
+int64_t window_room(const Tensor& tensor, int64_t index) {
+  if (tensor.window_pitch == 0) return std::numeric_limits<int64_t>::max();
+  const int64_t run =
+      tensor.window_run > 0 ? tensor.window_run : tensor.shape.back();
+  return run - index % run;
 }
 
 std::vector<int64_t> arg_int64s(const voyager::PrimOp& prim,
@@ -334,6 +373,23 @@ std::vector<int64_t> arg_int64s(const voyager::PrimOp& prim,
 void copy_run(MemoryInterface* memory, const Tensor& src, int64_t src_index,
               const Tensor& dst, int64_t dst_index, int64_t count) {
   if (count <= 0) return;
+
+  // A pitched window's logical run is contiguous only within one of its
+  // runs: split it at their ends and address each piece in the allocation.
+  if (src.window_pitch > 0 || dst.window_pitch > 0) {
+    while (count > 0) {
+      const int64_t piece = std::min(
+          {count, window_room(src, src_index), window_room(dst, dst_index)});
+      Tensor src_flat = src, dst_flat = dst;
+      src_flat.window_pitch = dst_flat.window_pitch = 0;
+      copy_run(memory, src_flat, window_element(src, src_index), dst_flat,
+               window_element(dst, dst_index), piece);
+      src_index += piece;
+      dst_index += piece;
+      count -= piece;
+    }
+    return;
+  }
 
   const size_t width = get_width(src);
   const bool byte_aligned = (src_index * width) % 8 == 0 &&
@@ -361,8 +417,8 @@ void copy_run(MemoryInterface* memory, const Tensor& src, int64_t src_index,
 void fill_run(MemoryInterface* memory, const Tensor& dst, int64_t dst_index,
               int64_t count, float value) {
   for (int64_t i = 0; i < count; i++) {
-    memory->write_value(dst.partition, dst.address, dst_index + i, dst.dtype,
-                        value);
+    memory->write_value(dst.partition, dst.address,
+                        window_element(dst, dst_index + i), dst.dtype, value);
   }
 }
 
@@ -486,62 +542,6 @@ std::vector<Tensor> resolve_outputs(const voyager::Operation& op,
   return outputs;
 }
 
-int64_t semaphore_slots(const voyager::TensorBox& box) {
-  int64_t slots = banks_of(box);
-  for (const auto dim : box.shape()) slots *= dim;
-  return slots;
-}
-
-int64_t resolve_bank(const voyager::TensorBoxRef& ref, const ScalarEnv& env,
-                     const std::string& op_name) {
-  const voyager::TensorBox& box = ref.box();
-  const int dims = box.shape_size();
-  if (dims == 0 || ref.offsets_size() == 0)
-    return select_bank(ref, env, op_name);
-
-  const auto reject = [&](const std::string& why) {
-    throw std::runtime_error("Semaphore TensorBoxRef " + box.node() +
-                             " in operation " + op_name + " (" + why + ").");
-  };
-
-  // [bank, *dims], one counter selected.
-  const int bank_dims = banks_of(box) > 1 ? 1 : 0;
-  if (ref.offsets_size() != dims + bank_dims ||
-      ref.sizes_size() != dims + bank_dims) {
-    reject("rank is not bank_count + the semaphore array's rank");
-  }
-  for (int d = 0; d < ref.sizes_size(); d++) {
-    if (ref.sizes(d) != 1) reject("selects more than one counter");
-  }
-
-  int64_t bank = 0;
-  if (bank_dims == 1) {
-    bank = eval_int(ref.offsets(0), env);
-    const uint32_t banks = banks_of(box);
-    if (bank < 0 || bank >= static_cast<int64_t>(banks)) {
-      reject("bank index " + std::to_string(bank) + " is out of range for " +
-             std::to_string(banks) + " banks");
-    }
-  }
-
-  int64_t index = 0;
-  for (int d = 0; d < dims; d++) {
-    const int64_t extent = box.shape(d);
-    const int64_t offset = eval_int(ref.offsets(d + bank_dims), env);
-    if (offset < 0 || offset >= extent) {
-      reject("index " + std::to_string(offset) +
-             " is out of range on "
-             "dimension " +
-             std::to_string(d) + " (extent " + std::to_string(extent) + ")");
-    }
-    index = index * extent + offset;
-  }
-
-  int64_t elements = 1;
-  for (const auto dim : box.shape()) elements *= dim;
-  return bank * elements + index;
-}
-
 // ===========================================================================
 // Data movement
 // ===========================================================================
@@ -607,6 +607,12 @@ void run_async_copy(const voyager::PrimOp& prim, const ScalarEnv& env,
         "async_copy " + name + ": buffer operand " + buffer.node +
         " has rank " + std::to_string(buffer_shape.size()) +
         " but the copy moves a rank-" + std::to_string(rank) + " tile.");
+  }
+
+  // A 0-d copy moves its one element (a run-time scalar staged on chip).
+  if (rank == 0) {
+    copy_run(memory, src, 0, dst, 0, 1);
+    return;
   }
 
   // Scatter the tile index across the dimensions the copy actually tiles.

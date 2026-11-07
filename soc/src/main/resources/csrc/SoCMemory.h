@@ -17,6 +17,10 @@
 // through the VPI backdoor. Writing a tile "to memory" therefore deposits it
 // straight into the simulated hardware, and reading a result reads the
 // hardware back -- which is what makes gold-vs-accelerator grading honest.
+//
+// Built for a DRAM config (HW_DMA), the DRAM partition is SimDRAM's backing
+// store instead: planned address a is DRAM_BASE + a (voyager_address.h), the
+// bytes the DUT's DMA engine moves.
 class SoCMemory : public ArrayMemory {
  public:
   explicit SoCMemory(const std::vector<uint64_t>& sizes);
@@ -51,6 +55,11 @@ class SoCMemory : public ArrayMemory {
   std::string memory_suffix;
   // Byte intervals of the SRAM partition the testbench wrote (unmerged).
   std::vector<std::pair<uint64_t, uint64_t>> shadow_ranges_;
+#ifdef HW_DMA
+  // SimDRAM's backing store at DRAM_BASE.
+  uint8_t* dram_ = nullptr;
+  uint8_t* dram_bytes(uint64_t address, int num_bytes);
+#endif
 
   std::string bank_path(const uint64_t address) const;
   vpiHandle get_handle(const uint64_t address);

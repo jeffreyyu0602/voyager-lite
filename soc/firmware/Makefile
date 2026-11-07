@@ -67,6 +67,11 @@ ifeq ($(SEMIHOSTING),1)
 COMMON_OBJS += common/semihost_write.o
 endif
 
+# A DRAM config's firmware (HW_DMA) pushes its copies onto the DMA engine.
+ifneq ($(filter -DHW_DMA,$(EXTRA_CFLAGS)),)
+COMMON_OBJS += common/dma.o
+endif
+
 #################################
 # Top-level targets
 #################################
@@ -93,13 +98,13 @@ common/traps.o: common/traps.c common/traps.h $(CFLAGS_STAMP)
 common/patch_bits.o: common/patch_bits.c common/patch_bits.h $(CFLAGS_STAMP)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-common/host_request.o: common/host_request.c common/host_request.h common/run_voyager_operation.h common/voyager_address.h $(CFLAGS_STAMP)
+common/host_request.o: common/host_request.c common/host_request.h common/voyager_address.h $(CFLAGS_STAMP)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 common/semihost_write.o: common/semihost_write.c $(CFLAGS_STAMP)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ): %.o: %.c common/run_voyager_operation.h common/host_request.h common/voyager_address.h common/voyager_params.h $(CFLAGS_STAMP)
+$(OBJ): %.o: %.c common/run_voyager_operation.h common/host_request.h common/dma.h common/voyager_address.h common/voyager_params.h $(CFLAGS_STAMP)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 %_scratchpad_data.o: %_scratchpad_data.c
@@ -115,3 +120,13 @@ endif
 
 $(DUMP): %.dump: %.riscv
 	$(OBJDUMP) -D $< > $@
+
+# Hand-written tests: tests/<name>.riscv, e.g. the DMA engine's directed test.
+common/dma.o: common/dma.c common/dma.h common/voyager_address.h $(CFLAGS_STAMP)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+tests/dma_test.o: tests/dma_test.c tests/dma_test_cases.h common/dma.h common/host_request.h $(CFLAGS_STAMP)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+tests/dma_test.riscv: tests/dma_test.o common/dma.o common/host_request.o
+	$(CC) $(LDFLAGS) $^ -o $@

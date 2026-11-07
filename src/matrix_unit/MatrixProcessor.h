@@ -20,7 +20,7 @@ template <typename... InputTypes, typename... WeightTypes, typename Input,
 struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
                        Input, Weight, Psum, Buffer, Scale, rows, cols,
                        buffer_size> : public sc_module {
-  static constexpr int LOOP_WIDTH = 10;
+  static constexpr int LOOP_WIDTH = MatrixParams::LOOP_WIDTH;
   static constexpr int FIFO_DEPTH = SUPPORT_MX ? 8 : 1;
 
 #if DOUBLE_BUFFERED_ACCUM_BUFFER
@@ -97,8 +97,6 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
   Connections::In<ac_int<Scale::width * cols, false>> CCS_INIT_S1(
       weight_scale_channel);
 #endif
-
-  Connections::SyncOut CCS_INIT_S1(start);
 
   SC_CTOR(MatrixProcessor) {
     input_skewer.clk(clk);
@@ -288,7 +286,6 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
     process_accumulation_params_enq.ResetWrite();
     write_back_params_enq.ResetWrite();
     input_skewer_din.ResetWrite();
-    start.Reset();
 
     wait();
 
@@ -297,8 +294,6 @@ struct MatrixProcessor<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
       push_weights_params.Push(params);
       process_accumulation_params_enq.Push(params);
       write_back_params_enq.Push(params);
-
-      start.SyncPush();
 
       ac_int<LOOP_WIDTH, false> loop_counters[2][6];
 

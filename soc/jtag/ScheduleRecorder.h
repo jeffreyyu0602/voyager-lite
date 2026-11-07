@@ -51,9 +51,6 @@ class ScheduleRecorder : public Backend {
   void scalar_op(const voyager::Operation& op, const voyager::PrimOp& prim,
                  const ScalarEnv& env) override;
   void execute(const voyager::Operation& op, const ScalarEnv& env) override;
-  void init_semaphore(const std::string&, int64_t, int64_t) override {}
-  void post_semaphore(const std::string&, int64_t, int64_t) override {}
-  void wait_semaphore(const std::string&, int64_t, int64_t) override {}
 
  private:
   std::vector<Step>* steps_;

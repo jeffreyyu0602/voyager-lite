@@ -73,6 +73,9 @@ jobs:
     name: systemc (${{ matrix.config }})
     needs: setup
     runs-on: self-hosted
+    # The MXNF4 row's nine networks outlast the 6-hour default on a busy
+    # server.
+    timeout-minutes: 720
     env:
       CONV2D_IM2COL: 1
       CLOCK_PERIOD: 5
@@ -99,6 +102,7 @@ jobs:
     name: rtl (${{ matrix.config }})
     needs: setup
     runs-on: self-hosted
+    timeout-minutes: 720
     env:
       CONV2D_IM2COL: 1
       CLOCK_PERIOD: 5
@@ -159,7 +163,7 @@ jobs:
       - name: Run Accuracy
         run: |
           source ci/env.sh
-          DATATYPE=${{ matrix.type }} IC_DIMENSION=16 OC_DIMENSION=16 CONV2D_IM2COL=1 python run_regression.py --models ${{ matrix.model }} --dataset ${{ matrix.dataset }} --sims accuracy --num_processes 16
+          DATATYPE=${{ matrix.type }} IC_DIMENSION=16 OC_DIMENSION=16 CONV2D_IM2COL=1 python run_accelerator.py --models ${{ matrix.model }} --dataset ${{ matrix.dataset }} --sims accuracy --num_processes 16
 
   # Compares each network's runtime with the latest successful run on main
   # and fails if any got slower.

@@ -13,9 +13,15 @@
 #include "runtime/GraphUtils.h"
 #include "soc/firmware/common/voyager_address.h"
 
-static_assert(sizeof(host_request_t) == 200, "host_request_t layout");
+static_assert(sizeof(host_request_t) == 168, "host_request_t layout");
 static_assert(offsetof(host_mailbox_t, tail) == 64, "host_mailbox_t layout");
 static_assert(offsetof(host_mailbox_t, slots) == 128, "host_mailbox_t layout");
+
+// SystemVerilog function exported by VerificationCollateral.v: adds 1 to the
+// hardware synchronization counter through the wrapper's DMA completion
+// port. Callable only inside a DPI call from that module, which every entry
+// into this testbench is.
+extern "C" void counter_add(int counter);
 
 static uint64_t vpi_time_now() {
   s_vpi_time t;
@@ -27,7 +33,7 @@ static uint64_t vpi_time_now() {
 namespace {
 
 // Indexed by request kind (host_request.h).
-const char* kKind[] = {"?", "COPY", "ZERO", "HOST_OP", "POST", "FINISH"};
+const char* kKind[] = {"?", "COPY", "ZERO", "HOST_OP", "FINISH"};
 // Indexed by HostOp::Kind.
 const char* kHostKind[] = {"copy", "zero", "host op"};
 
@@ -54,7 +60,7 @@ void SoCSimulation::start() {
   const char* mailbox = std::getenv("HOST_MAILBOX");
   if (mailbox == nullptr) {
     throw std::runtime_error(
-        "HOST_MAILBOX is not set: run_voyager.py reads the firmware's "
+        "HOST_MAILBOX is not set: run_soc.py reads the firmware's "
         "host_mailbox symbol from the ELF and exports its address.");
   }
   mailbox_ = std::strtoull(mailbox, nullptr, 0);
@@ -120,17 +126,14 @@ std::string SoCSimulation::describe(const Request& request) const {
       text += " " + table_[request.ordinal].op->name();
     }
   }
-  if (request.kind == HOST_REQ_POST) {
-    text += " after";
-    for (int u = 0; u < HOST_NUM_UNITS; u++) {
-      text += " " + std::to_string(request.retired[u]);
-    }
+  if (request.kind == HOST_REQ_COPY) {
+    text += " ctr " + std::to_string(request.counter);
   }
   if (request.cell != 0) {
     char cell[32];
     std::snprintf(cell, sizeof(cell), " cell 0x%llx",
                   static_cast<unsigned long long>(request.cell));
-    text += std::string(cell) + " +" + std::to_string(request.amount);
+    text += cell;
   }
   if (trace_ && request.nargs > 0) {
     text += " args";
@@ -156,16 +159,19 @@ ScalarEnv SoCSimulation::request_env(const HostOp& host,
   return env;
 }
 
-bool SoCSimulation::retired(const Request& post) const {
-  for (int u = 0; u < HOST_NUM_UNITS; u++) {
-    if (done_count_[u] < post.retired[u]) return false;
-  }
-  return true;
-}
-
 void SoCSimulation::complete(const Request& request) {
+  if (request.kind == HOST_REQ_COPY) {
+    if (request.counter >= NUM_COUNTERS) {
+      throw std::runtime_error("Copy #" + std::to_string(request.ordinal) +
+                               " names counter " +
+                               std::to_string(request.counter) + "; there are " +
+                               std::to_string(NUM_COUNTERS) + ".");
+    }
+    counter_add(static_cast<int>(request.counter));
+    return;
+  }
   if (request.cell == 0) return;
-  write_u64(request.cell, read_u64(request.cell) + request.amount);
+  write_u64(request.cell, read_u64(request.cell) + 1);
 }
 
 void SoCSimulation::execute(const Request& request) {
@@ -234,35 +240,12 @@ void SoCSimulation::service() {
   if (finished_) return;
   drain_mailbox();
 
-  // Retire posts complete on done counts, independently of the queue.
-  for (auto it = posts_.begin(); it != posts_.end();) {
-    if (retired(*it)) {
-      std::cerr << "[TB t=" << vpi_time_now() << "] " << describe(*it)
-                << " completed" << std::endl;
-      complete(*it);
-      it = posts_.erase(it);
-    } else {
-      ++it;
-    }
-  }
-
   while (!queue_.empty() && !finished_) {
-    const Request request = queue_.front();
-    if (request.kind == HOST_REQ_POST) {
-      queue_.pop_front();
-      if (retired(request)) {
-        std::cerr << "[TB t=" << vpi_time_now() << "] " << describe(request)
-                  << " completed" << std::endl;
-        complete(request);
-      } else {
-        posts_.push_back(request);
-      }
-      continue;
-    }
-    // Everything else touches the scratchpad. A unit's done does not mean
-    // its last writes have landed (the up_proj lesson, +done_settle in
+    // Every request touches the scratchpad. A unit's done does not mean its
+    // last writes have landed (the up_proj lesson, +done_settle in
     // VerificationCollateral.v), so hold until every done has settled.
     if (settling_ > 0) return;
+    const Request request = queue_.front();
     queue_.pop_front();
     execute(request);
     complete(request);
@@ -293,7 +276,7 @@ void SoCSimulation::unit_done(int unit) {
 }
 
 void SoCSimulation::unit_retired(int unit) {
+  (void)unit;
   settling_--;
-  if (unit >= 0 && unit < HOST_NUM_UNITS) done_count_[unit]++;
   service();
 }

@@ -180,9 +180,22 @@ Harness::Harness(sc_module_name name, const Model& model,
   REGISTER_FN(store_mx_scale_output)
   REGISTER_FN(store_sparse_tensor_output)
 
+#define REGISTER_UNIT_FN(NAME)   \
+  REGISTER_FN(NAME##_starts);    \
+  REGISTER_FN(NAME##_dones);
+
   REGISTER_FN(run_walker)
-  REGISTER_FN(release_starts)
-  REGISTER_FN(retire_dones)
+  REGISTER_UNIT_FN(matrix_unit)
+  REGISTER_UNIT_FN(vector_unit)
+#if SUPPORT_MVM
+  REGISTER_UNIT_FN(matrix_vector_unit)
+#endif
+#if SUPPORT_SPMM
+  REGISTER_UNIT_FN(spmm_unit)
+#endif
+#if SUPPORT_DWC
+  REGISTER_UNIT_FN(dwc_unit)
+#endif
 
   access_counter = new AccessCounter();
 // do not set access counters for an RTL simulation
@@ -371,37 +384,41 @@ T* get_param(const std::deque<BaseParams*>& params, int& index) {
   return nullptr;
 }
 
-// Serialize one operation's params and queue its invocation groups.
+// Serialize one operation's params and queue a pass on each unit it drives.
 //
-// The old harness drove each group to completion before sending the next:
-// params, start, done, one group at a time, which serialized every tile's
-// buffer loads against the previous tile's drain. Here the walk only pushes
-// params -- the units' deserializers hand them to the double-buffered
-// controllers, so the next tile's input and weight fetches begin while the
-// current tile computes -- and queues a descriptor per group; the
-// release_starts and retire_dones threads pace the handshakes.
+// The walk only pushes params -- the units' deserializers hand them to the
+// double-buffered controllers, so the next tile's input and weight fetches
+// begin while the current tile computes -- and the unit threads pace the
+// handshakes. Groups within one operation are the passes of a multi-pass op
+// (softmax and layer_norm expand into three vector passes, a strided
+// quantize_mx into a scale pass and a main pass); each unit runs its passes in
+// queue order. A unit can start a pass before the previous one has finished
+// writing, so a pass also waits for the previous pass of the same operation
+// on its unit to retire: the ordering the SoC emitter gives those passes
+// with counter 31 (the IR's waits order passes of different operations).
 //
-// Only consecutive operations overlap. Groups within one operation are the
-// passes of a multi-pass op -- softmax and layer_norm expand into three
-// vector passes, a strided quantize_mx into a scale pass and a main pass --
-// and each pass reads what the previous one wrote. So every group after the
-// first drains the pipeline before its params go out, exactly as the old
-// harness gated each pass on the previous one's done.
+// Inside a commit, the commit's waits on a unit go to the first group that
+// starts that unit -- "matrix" being the matrix-class units the params select:
+// the systolic array, the MVM or the DwC unit, and the SpMM unit, each of which
+// gets every "matrix" wait -- and its post fires when its last group retires.
 void Harness::dispatch_params(const voyager::Operation& op,
                               const std::deque<BaseParams*>& params) {
-  int idx = 0;
-  bool first = true;
-  while (idx < params.size()) {
-    if (!first) drain();
+  auto timing = std::make_shared<OpTiming>();
+  timing->op = &op;
+  // The sequence number of this operation's latest pass on each unit.
+  std::map<Unit*, long> previous_pass;
 
-    InvocationGroup group;
+  int idx = 0;
+  while (idx < params.size()) {
+    std::vector<Unit*> matrix_class;
+    bool vector = false;
 
     if (auto* matrix_params = get_param<MatrixParams>(params, idx)) {
 #if SUPPORT_MVM
       if (matrix_params->is_fc) {
         send_serialized_params<MatrixParams, 64>(*matrix_params,
                                                  &matrix_vector_unit_params_in);
-        group.matrix_vector = true;
+        matrix_class.push_back(&matrix_vector_unit_queue);
       } else
 #endif
 #if SUPPORT_SPMM
@@ -410,22 +427,22 @@ void Harness::dispatch_params(const voyager::Operation& op,
         if (auto* dense_params = get_param<MatrixParams>(params, idx)) {
           send_serialized_params<MatrixParams, 64>(*dense_params,
                                                    &matrix_unit_params_in);
-          group.matrix = true;
+          matrix_class.push_back(&matrix_unit_queue);
         }
         send_serialized_params<MatrixParams, 64>(*matrix_params,
                                                  &spmm_unit_params_in);
-        group.spmm = true;
+        matrix_class.push_back(&spmm_unit_queue);
       } else
 #endif
       {
         send_serialized_params<MatrixParams, 64>(*matrix_params,
                                                  &matrix_unit_params_in);
-        group.matrix = true;
+        matrix_class.push_back(&matrix_unit_queue);
       }
     } else if (auto* dwc_params = get_param<DwCParams>(params, idx)) {
 #if SUPPORT_DWC
       send_serialized_params<DwCParams, 64>(*dwc_params, &dwc_unit_params_in);
-      group.dwc = true;
+      matrix_class.push_back(&dwc_unit_queue);
 #else
       throw std::runtime_error("DWC support is not enabled.");
 #endif
@@ -438,198 +455,216 @@ void Harness::dispatch_params(const voyager::Operation& op,
       auto* vector_config = get_param<VectorInstructionConfig>(params, idx);
       send_serialized_params<VectorInstructionConfig, 64>(
           *vector_config, &vector_unit_params_in);
-      group.vector = true;
+      vector = true;
     }
 
-    group.op_begin = first ? &op : nullptr;
-    first = false;
-    if (idx >= params.size()) group.op_end = &op;
+    auto group = std::make_shared<Group>();
+    group->timing = timing;
+    group->commit = open_commit;
+    group->last = idx >= params.size();
 
-    pending_groups++;
-    start_queue.push_back(group);
-    start_pushed.notify(SC_ZERO_TIME);
+    std::vector<CounterWait> matrix_waits;
+    std::vector<CounterWait> vector_waits;
+    if (open_commit) {
+      Commit& commit = *open_commit;
+      commit.groups++;
+      commit.groups_left++;
+      for (const auto& wait : commit.sync.waits) {
+        if (wait.unit == "matrix") {
+          if (!matrix_class.empty() && !commit.matrix_waits_taken) {
+            matrix_waits.push_back(wait);
+          }
+        } else if (wait.unit == "vector") {
+          if (vector && !commit.vector_waits_taken) {
+            vector_waits.push_back(wait);
+          }
+        } else {
+          throw std::runtime_error(commit.sync.op + ": wait on counter " +
+                                   wait.node + " names the unit \"" +
+                                   wait.unit + "\", not matrix or vector.");
+        }
+      }
+      if (!matrix_class.empty()) commit.matrix_waits_taken = true;
+      if (vector) commit.vector_waits_taken = true;
+    }
+
+    std::vector<std::pair<Unit*, std::vector<CounterWait>>> passes;
+    for (Unit* unit : matrix_class) passes.emplace_back(unit, matrix_waits);
+    if (vector) passes.emplace_back(&vector_unit_queue, vector_waits);
+    if (passes.empty()) {
+      throw std::runtime_error(op.name() + ": params entry " +
+                               std::to_string(idx) + " drives no unit.");
+    }
+
+    group->passes_left = static_cast<int>(passes.size());
+    for (auto& [unit, waits] : passes) {
+      const auto earlier = previous_pass.find(unit);
+      const long after = earlier == previous_pass.end() ? -1 : earlier->second;
+      previous_pass[unit] = unit->dispatched++;
+      unit->to_start.push_back({std::move(waits), group, after});
+      unit->pushed.notify(SC_ZERO_TIME);
+    }
   }
 }
 
-// Release each queued group's units in program order. SyncPop completes when
-// the unit offers its start handshake -- the matrix unit raises it from the
-// processor at the front of its pipeline, so a release can land while the
-// previous group still drains through the accumulation buffer and output
-// controller behind it.
-//
-// The vector unit is the exception, as it is in the SoC (Voyager.scala's
-// vector_unit_start_rdy): its start is held until the previous vector pass
-// has retired. The vector unit raises start before it hands the params to
-// its fetcher, so nothing can run ahead into a tile the previous pass is
-// still writing -- the read-after-write between the two ops of a k-split
-// reduction's commit body (the GEMM's in-place accumulate and its epilogue),
-// and between the passes of a multi-pass op, is ordered by this gate alone.
-void Harness::release_starts() {
-  matrix_unit_start.ResetRead();
-  vector_unit_start.ResetRead();
-#if SUPPORT_MVM
-  matrix_vector_unit_start.ResetRead();
-#endif
-#if SUPPORT_SPMM
-  spmm_unit_start.ResetRead();
-#endif
-#if SUPPORT_DWC
-  dwc_unit_start.ResetRead();
-#endif
+// Start a unit's queued passes in order. A pass starts once every wait it
+// carries holds; SyncPop then completes when the unit offers its start
+// handshake -- the matrix unit raises it from the processor at the front of
+// its pipeline, so a start can land while the previous pass still drains
+// through the accumulation buffer and output controller behind it.
+void Harness::drive_starts(Unit& unit) {
+  unit.start->ResetRead();
 
   wait();
 
   while (true) {
-    while (start_queue.empty()) wait(start_pushed);
-    InvocationGroup group = start_queue.front();
-    start_queue.pop_front();
+    while (unit.to_start.empty()) wait(unit.pushed);
+    Pass pass = std::move(unit.to_start.front());
+    unit.to_start.pop_front();
 
-    if (group.op_begin != nullptr) {
-      op_release_time = sc_time_stamp();
-      CCS_LOG("----- Accelerator Layer '" << group.op_begin->name()
+    for (const auto& wait_on : pass.waits) {
+      while (counters_[wait_on.counter] < wait_on.threshold) {
+        wait(counter_changed[wait_on.counter]);
+      }
+    }
+    while (unit.retired <= pass.after) wait(unit.pass_retired);
+    unit.start->SyncPop();
+
+    OpTiming& timing = *pass.group->timing;
+    if (!timing.started) {
+      timing.started = true;
+      timing.start = sc_time_stamp();
+      CCS_LOG("----- Accelerator Layer '" << timing.op->name()
                                           << "' Started. -----");
     }
 
-    // Popping every start before any done (in retire_dones) preserves
-    // concurrency within a group -- a fused SpMM runs its dense matrix and
-    // sparse passes at once.
-    if (group.matrix) matrix_unit_start.SyncPop();
-#if SUPPORT_MVM
-    if (group.matrix_vector) matrix_vector_unit_start.SyncPop();
-#endif
-#if SUPPORT_SPMM
-    if (group.spmm) spmm_unit_start.SyncPop();
-#endif
-#if SUPPORT_DWC
-    if (group.dwc) dwc_unit_start.SyncPop();
-#endif
-    if (group.vector) {
-      while (vector_inflight > 0) wait(vector_retired);
-      vector_unit_start.SyncPop();
-      assert(vector_inflight == 0);
-      vector_inflight++;
-    }
-
-    // An operation's groups are contiguous, so the release time captured at
-    // its op_begin group is still current at its op_end group.
-    if (group.op_end != nullptr) group.start_time = op_release_time;
-
-    done_queue.push_back(group);
-    done_pushed.notify(SC_ZERO_TIME);
+    unit.to_retire.push_back(std::move(pass));
+    unit.started.notify(SC_ZERO_TIME);
   }
 }
 
-// Retire groups in the order they started: pop the done handshakes, then fire
-// whatever the group carried -- a commit's post, and the per-op logging. A
-// post token is safe to fire here because everything queued ahead of it has
-// already retired.
-void Harness::retire_dones() {
-  matrix_unit_done.ResetRead();
-  vector_unit_done.ResetRead();
-#if SUPPORT_MVM
-  matrix_vector_unit_done.ResetRead();
-#endif
-#if SUPPORT_SPMM
-  spmm_unit_done.ResetRead();
-#endif
-#if SUPPORT_DWC
-  dwc_unit_done.ResetRead();
-#endif
+// Retire a unit's passes in the order they started: pop the done handshake,
+// and when the pass is the last of its group to finish, fire what the group
+// carried -- its commit's post once the walk has closed the commit, and the
+// per-op logging.
+void Harness::drive_dones(Unit& unit) {
+  unit.done->ResetRead();
 
   wait();
 
   while (true) {
-    while (done_queue.empty()) wait(done_pushed);
-    InvocationGroup group = done_queue.front();
-    done_queue.pop_front();
+    while (unit.to_retire.empty()) wait(unit.started);
+    Pass pass = std::move(unit.to_retire.front());
+    unit.to_retire.pop_front();
 
-    if (group.matrix) matrix_unit_done.SyncPop();
-#if SUPPORT_MVM
-    if (group.matrix_vector) matrix_vector_unit_done.SyncPop();
-#endif
-#if SUPPORT_SPMM
-    if (group.spmm) spmm_unit_done.SyncPop();
-#endif
-#if SUPPORT_DWC
-    if (group.dwc) dwc_unit_done.SyncPop();
-#endif
-    if (group.vector) {
-      vector_unit_done.SyncPop();
-      vector_inflight--;
-      vector_retired.notify(SC_ZERO_TIME);
+    unit.done->SyncPop();
+    unit.retired++;
+    unit.pass_retired.notify(SC_ZERO_TIME);
+
+    Group& group = *pass.group;
+    if (--group.passes_left > 0) continue;
+
+    if (group.commit) {
+      Commit& commit = *group.commit;
+      if (--commit.groups_left == 0 && commit.closed) post_commit(commit);
     }
 
-    if (group.has_post) {
-      post_semaphore(group.post_node, group.post_slot, group.post_amount);
-    }
-
-    if (group.op_end != nullptr) {
+    if (group.last) {
       const sc_time end = sc_time_stamp();
-      CCS_LOG("----- Accelerator Layer '" << group.op_end->name()
+      const OpTiming& timing = *group.timing;
+      CCS_LOG("----- Accelerator Layer '" << timing.op->name()
                                           << "' Finished. -----");
       // to_default_time_units returns a double; print whole nanoseconds so
       // large values do not switch to scientific notation.
       std::cout << "Runtime: "
-                << static_cast<long long>(
-                       end.to_default_time_units() -
-                       group.start_time.to_default_time_units())
+                << static_cast<long long>(end.to_default_time_units() -
+                                          timing.start.to_default_time_units())
                 << " ns" << std::endl;
-      if (group.op_end->has_tiling()) {
-        access_counter->print_summary(group.op_end->tiling(), true);
+      if (timing.op->has_tiling()) {
+        access_counter->print_summary(timing.op->tiling(), true);
       }
     }
-
-    pending_groups--;
-    if (pending_groups == 0) group_retired.notify(SC_ZERO_TIME);
   }
 }
 
-void Harness::drain() {
-  while (pending_groups > 0) wait(group_retired);
+#define DEFINE_UNIT_FN(NAME)                                    \
+  void Harness::NAME##_starts() { drive_starts(NAME##_queue); } \
+  void Harness::NAME##_dones() { drive_dones(NAME##_queue); }
+
+DEFINE_UNIT_FN(matrix_unit)
+DEFINE_UNIT_FN(vector_unit)
+#if SUPPORT_MVM
+DEFINE_UNIT_FN(matrix_vector_unit)
+#endif
+#if SUPPORT_SPMM
+DEFINE_UNIT_FN(spmm_unit)
+#endif
+#if SUPPORT_DWC
+DEFINE_UNIT_FN(dwc_unit)
+#endif
+
+void Harness::post_commit(Commit& commit) {
+  if (!commit.sync.post) return;
+  posts_pending[*commit.sync.post]--;
+  add_counter(*commit.sync.post);
 }
 
-void Harness::begin_commit() { in_commit = true; }
-
-// A commit's post must not fire until the whole region has retired. The walk
-// reaches end_commit as soon as it has pushed the params, so the post rides
-// the queues as a unit-less token behind the region's groups.
-void Harness::end_commit(bool has_post, const std::string& post_node,
-                         int64_t post_slot, int64_t post_amount) {
-  in_commit = false;
-  if (!has_post) return;
-
-  InvocationGroup token;
-  token.has_post = true;
-  token.post_node = post_node;
-  token.post_slot = post_slot;
-  token.post_amount = post_amount;
-
-  pending_groups++;
-  start_queue.push_back(token);
-  start_pushed.notify(SC_ZERO_TIME);
+void Harness::begin_commit(const CommitSync& sync) {
+  if (open_commit) {
+    throw std::runtime_error(sync.op + ": a commit inside commit " +
+                             open_commit->sync.op + ".");
+  }
+  open_commit = std::make_shared<Commit>();
+  open_commit->sync = sync;
+  if (sync.post) posts_pending[*sync.post]++;
 }
 
-void Harness::init_semaphore(const std::string& node, int64_t slot,
-                             int64_t value) {
-  auto& semaphore = sync_semaphores[{node, slot}];
-  semaphore.count = value;
+// The walk reaches end_commit as soon as it has pushed the body's params.
+// Every wait must have gone to a pass -- a wait on a unit the body never
+// dispatches would gate some later dispatch instead -- and the post needs a
+// pass to fire from.
+void Harness::end_commit() {
+  Commit& commit = *open_commit;
+  for (const auto& wait : commit.sync.waits) {
+    const bool taken = wait.unit == "matrix" ? commit.matrix_waits_taken
+                                             : commit.vector_waits_taken;
+    if (!taken) {
+      throw std::runtime_error(commit.sync.op + ": " + wait.unit +
+                               " wait on counter " + wait.node +
+                               ", but the commit dispatches no " + wait.unit +
+                               " pass.");
+    }
+  }
+  if (commit.sync.post && commit.groups == 0) {
+    throw std::runtime_error(commit.sync.op + ": posts counter " +
+                             commit.sync.post_node +
+                             " but dispatches nothing.");
+  }
+  commit.closed = true;
+  if (commit.groups_left == 0) post_commit(commit);
+  open_commit.reset();
 }
 
-void Harness::post_semaphore(const std::string& node, int64_t slot,
-                             int64_t amount) {
-  auto& semaphore = sync_semaphores[{node, slot}];
-  semaphore.count += amount;
-  semaphore.posted.notify(SC_ZERO_TIME);
+void Harness::reset_counter(int64_t id, const std::string& node) {
+  if (posts_pending[id] > 0) {
+    throw std::runtime_error(
+        "counter " + node + " (id " + std::to_string(id) + ") reset while " +
+        std::to_string(posts_pending[id]) +
+        " dispatched pass(es) have yet to add to it.");
+  }
+  Backend::reset_counter(id, node);
 }
 
-// Called from the walk; blocks until retire_dones (or an async_copy on the
-// walk itself) has posted enough credits. This is the back-pressure that
-// keeps the walk at most one ping-pong slot ahead of the hardware.
-void Harness::wait_semaphore(const std::string& node, int64_t slot,
-                             int64_t amount) {
-  auto& semaphore = sync_semaphores[{node, slot}];
-  while (semaphore.count < amount) wait(semaphore.posted);
-  semaphore.count -= amount;
+void Harness::add_counter(int64_t id) {
+  Backend::add_counter(id);
+  counter_changed[id].notify(SC_ZERO_TIME);
+}
+
+// Called from the walk; blocks until the unit threads (or the walk's own
+// copies) have counted up to the threshold.
+void Harness::wait_counter(int64_t id, int64_t threshold,
+                           const std::string& op) {
+  while (counters_[id] < threshold) wait(counter_changed[id]);
 }
 
 // Drives the DUT. The bufferized graph already states the tile loops, the
@@ -657,9 +692,9 @@ void Harness::run_walker() {
   Interpreter interpreter(model, memory, this);
   interpreter.run(selection);
 
-  // The walk returning only means every group was queued; wait for the
-  // hardware to retire them all before stamping the runtime.
-  drain();
+  // Every kernel's epilogue waits each counter at its final count, so the
+  // walk returns with every pass retired.
+  interpreter.log_counters();
 
   const sc_time end = sc_time_stamp();
   std::cout << "Total Runtime: "
@@ -675,11 +710,9 @@ void Harness::execute(const voyager::Operation& op, const ScalarEnv& env) {
 
   // Anything the compiler tagged "cpu" runs on the control processor, not the
   // datapath -- a slice, a host-side pad. Those still need a kernel, so let the
-  // gold model do them in place, exactly as it does in the gold flow. Host ops
-  // are not sequenced by the semaphore protocol, so quiesce the datapath
-  // first.
+  // gold model do them in place, exactly as it does in the gold flow. The
+  // IR's CPU waits before one ensure it reads nothing a pass is still writing.
   if (!is_datapath(op)) {
-    drain();
     run_host_operation(op, env, memory);
     return;
   }
@@ -698,13 +731,9 @@ void Harness::execute(const voyager::Operation& op, const ScalarEnv& env) {
   }
 #endif
 
-  // A synchronous operation is a barrier on both sides: it waits on none of
-  // the semaphores the in-flight commits will post, so only a drain orders its
-  // fetches after their writes, and the interpreter posts Operation.semaphore
-  // the moment execute returns.
-  if (!in_commit) drain();
+  // Synchronous and committed dispatches alike only queue their passes: the
+  // IR's counter waits order them against everything else.
   dispatch_params(op, params);
-  if (!in_commit) drain();
 
   for (auto* param : params) delete param;
 }
