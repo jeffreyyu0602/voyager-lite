@@ -57,8 +57,9 @@ endif
 # filed and tested under, networks/<NETWORK>/<DATATYPE>/; these pick what is
 # compiled into it:
 #   MODE         compile_model.py's model, e.g. clm (default: NETWORK)
-#   STAGE        the one stage of a causal LM (MODE=clm) to compile:
-#                prefill or decode
+#   LLM_STAGE    the one stage of a causal LM (MODE=clm) to compile:
+#                prefill or decode (not STAGE, which Catapult's makefiles
+#                read)
 #   CHECKPOINT   --model_name_or_path (default: the compiler's own)
 #   QCONFIG      --qconfig (default: none)
 #   KV_CACHE     kivi: a decode's KV cache in KIVI's 2-bit format
@@ -68,11 +69,11 @@ endif
 #                or ck [in, out] (--weight_layout; default: the compiler's)
 # A network's settings live in ci/networks/<network>.env, KEY=VALUE per line,
 # and the drivers pass them on make's command line. For example:
-#   make network-proto NETWORK=llama2_7b_decode_kivi MODE=clm STAGE=decode \
-#     KV_CACHE=kivi CHECKPOINT=meta-llama/Llama-2-7b-hf
+#   make network-proto NETWORK=llama2_7b_decode_kivi MODE=clm \
+#     LLM_STAGE=decode KV_CACHE=kivi CHECKPOINT=meta-llama/Llama-2-7b-hf
 ################################################################################
 MODE ?= $(NETWORK)
-STAGE ?=
+LLM_STAGE ?=
 CHECKPOINT ?=
 QCONFIG ?=
 KV_CACHE ?=
@@ -82,13 +83,13 @@ RESIDUAL_LENGTH ?= 128
 WEIGHT_LAYOUT ?=
 
 ifeq ($(MODE),clm)
-ifeq ($(STAGE),)
-$(error MODE=clm compiles one STAGE (prefill or decode): set STAGE)
+ifeq ($(LLM_STAGE),)
+$(error MODE=clm compiles one LLM_STAGE (prefill or decode): set LLM_STAGE)
 endif
 endif
 
 NETWORK_FLAGS := \
-	$(if $(filter clm,$(MODE)),--stage $(STAGE) $(LLM_FLAGS)) \
+	$(if $(filter clm,$(MODE)),--stage $(LLM_STAGE) $(LLM_FLAGS)) \
 	$(if $(and $(filter clm,$(MODE)),$(filter MXNF4,$(DATATYPE))),$(LLM_MXNF4_FLAGS)) \
 	$(if $(CHECKPOINT),--model_name_or_path $(CHECKPOINT)) \
 	$(if $(QCONFIG),--qconfig $(QCONFIG)) \
