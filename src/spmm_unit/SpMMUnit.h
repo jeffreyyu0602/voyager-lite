@@ -27,7 +27,7 @@ template <typename... WeightTypes, typename Input, typename Weight,
           int width, int bs, int vu_width>
 struct SpMMUnit<std::tuple<WeightTypes...>, Input, Weight, Meta, Output, Scale,
                 port_width, width, bs, vu_width> : public sc_module {
-  static constexpr int LOOP_WIDTH = 16;
+  static constexpr int LOOP_WIDTH = MatrixParams::LOOP_WIDTH;
   using loop_t = ac_int<LOOP_WIDTH, false>;
 
 #ifdef CLOCK_PERIOD

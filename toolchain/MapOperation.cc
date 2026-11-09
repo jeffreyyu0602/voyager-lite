@@ -6,6 +6,7 @@
 #include "toolchain/MatrixOps.h"
 #include "toolchain/MatrixVectorMultiply.h"
 #include "toolchain/Pooling.h"
+#include "toolchain/RMSNorm.h"
 #include "toolchain/Reduction.h"
 #include "toolchain/Softmax.h"
 #include "toolchain/VectorOps.h"
@@ -27,6 +28,8 @@ void map_operation(const voyager::Operation& operation, const ScalarEnv& env,
     }
   } else if (strip_namespace(anchor_op.target()) == "layer_norm") {
     map_layer_norm(operation, env, mapped_params);
+  } else if (strip_namespace(anchor_op.target()) == "rms_norm") {
+    map_rms_norm(operation, env, mapped_params);
   } else if (strip_namespace(anchor_op.target()) == "softmax") {
     map_softmax(operation, env, mapped_params);
   } else if (strip_namespace(anchor_op.target()) == "max_pool2d" ||

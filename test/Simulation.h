@@ -72,6 +72,8 @@ class Simulation {
   std::map<std::string, ArrayMemory*> memories;
   std::vector<const voyager::TensorBox*> live_in;
   std::vector<const voyager::TensorBox*> live_out;
+  // How each live_out buffer is graded (Model::live_sets).
+  std::map<std::string, Model::Grading> grading;
   std::string out_dir;
   float rtol;
   float atol;

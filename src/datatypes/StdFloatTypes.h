@@ -95,8 +95,27 @@ class StdFloat {
     return ac_math::ac_exp_pwl<ac_float_rep>(float_val);
   }
 
+  // A normal power of two 2^e returns the exact 2^-e (subnormal for the
+  // largest e); every other value, subnormal powers of two included (their
+  // reciprocal overflows and saturates), takes the PWL approximation.
 #pragma hls_design ccore
   StdFloat reciprocal() const {
+    const ac_int<mant_bits, false> fraction =
+        float_val.d.template slc<mant_bits>(0);
+    const ac_int<e_width, false> biased = unbiased_exponent();
+    const bool power_of_two =
+        fraction == 0 && biased != 0 && biased <= 2 * emax;
+    if (power_of_two) {
+      StdFloat exact = *this;
+      if (biased == 2 * emax) {
+        exact.float_val.d.set_slc(mant_bits, ac_int<e_width, false>(0));
+        exact.float_val.d[mant_bits - 1] = 1;
+      } else {
+        const ac_int<e_width, false> negated = 2 * emax - biased;
+        exact.float_val.d.set_slc(mant_bits, negated);
+      }
+      return exact;
+    }
     return ac_math::ac_reciprocal_pwl<ac_float_rep, AC_RND>(float_val);
   }
 

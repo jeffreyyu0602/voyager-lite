@@ -41,8 +41,8 @@ void collect_argument_names(const voyager::Argument& argument,
 }
 
 // Mirrors Interpreter::execute_prim's routing: which prims move data or run
-// a host kernel, as opposed to computing scalars, dispatching, or keeping a
-// semaphore (which the firmware does itself).
+// a host kernel, as opposed to computing scalars, dispatching, or driving a
+// counter (which the firmware does itself).
 bool classify(const voyager::Operation& op, HostOp::Kind* kind) {
   if (op.op_type_case() != voyager::Operation::kPrim) return false;
   const voyager::PrimOp& prim = op.prim();
@@ -59,16 +59,17 @@ bool classify(const voyager::Operation& op, HostOp::Kind* kind) {
     const auto& box = op.outputs(0).tensor_box();
     const bool is_integer =
         box.dtype().rfind("int", 0) == 0 || box.dtype().rfind("uint", 0) == 0;
-    if (!(is_integer && box.has_memory() && !is_semaphore(box))) return false;
+    if (!(is_integer && box.has_memory() && !is_counter(box))) return false;
     *kind = HostOp::kZero;
     return true;
   }
   if (target == "voyager::zeros") {
-    if (!declares_box || is_semaphore(op.outputs(0).tensor_box())) return false;
+    const voyager::TensorBox* box = zeros_target(op);
+    if (box == nullptr || is_counter(*box)) return false;
     *kind = HostOp::kZero;
     return true;
   }
-  if (target.rfind("voyager::", 0) == 0) return false;  // fill, wait, ...
+  if (target.rfind("voyager::", 0) == 0) return false;  // wait, drain, ...
   bool only_scalars = op.outputs_size() > 0;
   for (const auto& output : op.outputs()) {
     if (!output.has_scalar()) only_scalars = false;
@@ -111,6 +112,17 @@ void walk(const voyager::Operation& op, std::vector<HostOp>* table) {
 }
 
 }  // namespace
+
+const voyager::TensorBox* zeros_target(const voyager::Operation& op) {
+  for (const auto& [key, argument] : op.prim().kwargs()) {
+    if (argument.has_tensor_box()) return &argument.tensor_box().box();
+  }
+  if (op.outputs_size() != 1) return nullptr;
+  const voyager::Output& output = op.outputs(0);
+  if (output.has_destination()) return &output.destination().box();
+  if (output.has_tensor_box()) return &output.tensor_box();
+  return nullptr;
+}
 
 std::vector<HostOp> enumerate_host_ops(const Model::Selection& selection) {
   std::vector<HostOp> table;

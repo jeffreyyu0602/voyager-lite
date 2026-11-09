@@ -5,6 +5,21 @@
 
 #include "runtime/GraphUtils.h"
 
+#ifdef HW_DMA
+#include <sys/mman.h>
+
+#include <cstring>
+#include <map>
+#include <stdexcept>
+
+#include "soc/firmware/common/voyager_address.h"
+
+// SimDRAM's backing stores (SimDRAM.cc, the same gen-collateral), by chip and
+// base address.
+#include "mm.h"
+extern std::vector<std::map<long long int, backing_data_t>> backing_mem_data;
+#endif
+
 SoCMemory::SoCMemory(const std::vector<uint64_t>& sizes)
     : ArrayMemory(sizes),
       cache_size(get_env_int("SCRATCHPAD_SIZE", 8 * 1024 * 1024)),
@@ -15,7 +30,39 @@ SoCMemory::SoCMemory(const std::vector<uint64_t>& sizes)
       // Rows per SRAM macro: a subbank deeper than one macro stacks them as
       // mem_1_<w>, mem_2_<w>, ... Default keeps everything in depth 0.
       macro_depth(get_env_int("MACRO_DEPTH", 1 << 30)),
-      memory_suffix(get_env("MEMORY_SUFFIX", "ram")) {}
+      memory_suffix(get_env("MEMORY_SUFFIX", "ram")) {
+#ifdef HW_DMA
+  // SimDRAM's memory_init, at its first clock after reset, adopts a store
+  // that already exists for its base; the data loads before that.
+  if (backing_mem_data.empty()) backing_mem_data.emplace_back();
+  auto& stores = backing_mem_data[0];
+  auto store = stores.find(DRAM_BASE);
+  if (store == stores.end()) {
+    void* data = mmap(nullptr, DRAM_SIZE, PROT_READ | PROT_WRITE,
+                      MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (data == MAP_FAILED) throw std::runtime_error("DRAM mmap failed");
+    store = stores
+                .emplace(DRAM_BASE,
+                         backing_data_t{static_cast<uint8_t*>(data), DRAM_SIZE})
+                .first;
+  }
+  if (store->second.size != DRAM_SIZE) {
+    throw std::runtime_error("SimDRAM's store at DRAM_BASE is not DRAM_SIZE");
+  }
+  dram_ = store->second.data;
+#endif
+}
+
+#ifdef HW_DMA
+uint8_t* SoCMemory::dram_bytes(uint64_t address, int num_bytes) {
+  if (num_bytes < 0 || address + num_bytes > DRAM_SIZE) {
+    throw std::runtime_error("DRAM access [" + std::to_string(address) + ", +" +
+                             std::to_string(num_bytes) +
+                             ") is outside SimDRAM's store");
+  }
+  return dram_ + address;
+}
+#endif
 
 // The TLRAM serving `address`: "system.<bank>.<subbank>".
 std::string SoCMemory::bank_path(const uint64_t address) const {
@@ -156,12 +203,19 @@ uint8_t SoCMemory::read_byte(uint64_t addr) {
 
 bool SoCMemory::was_written(int partition, uint64_t address) const {
   if (partition == SRAM_PARTITION) return true;
+#ifdef HW_DMA
+  // The DMA engine writes SimDRAM's store, which host tracking cannot see.
+  if (partition == DRAM_PARTITION) return true;
+#endif
   return ArrayMemory::was_written(partition, address);
 }
 
 bool SoCMemory::any_written(int partition, uint64_t address,
                             uint64_t num_bytes) const {
   if (partition == SRAM_PARTITION) return true;
+#ifdef HW_DMA
+  if (partition == DRAM_PARTITION) return true;
+#endif
   return ArrayMemory::any_written(partition, address, num_bytes);
 }
 
@@ -178,6 +232,12 @@ void SoCMemory::write_bytes_to_memory(const long long address,
     shadow_ranges_.emplace_back(address, address + num_bytes);
     return;
   }
+#ifdef HW_DMA
+  if (partition == DRAM_PARTITION) {
+    std::memcpy(dram_bytes(address, num_bytes), bytes, num_bytes);
+    return;
+  }
+#endif
   ArrayMemory::write_bytes_to_memory(address, partition, num_bytes, bytes);
 }
 
@@ -232,5 +292,11 @@ void SoCMemory::read_bytes_from_memory(const long long address,
     }
     return;
   }
+#ifdef HW_DMA
+  if (partition == DRAM_PARTITION) {
+    std::memcpy(bytes, dram_bytes(address, num_bytes), num_bytes);
+    return;
+  }
+#endif
   ArrayMemory::read_bytes_from_memory(address, partition, num_bytes, bytes);
 }

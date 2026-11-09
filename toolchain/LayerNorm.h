@@ -38,7 +38,7 @@ void map_layer_norm(const voyager::Operation& operation, const ScalarEnv& env,
 
   constexpr int vu_unit_ratio = OC_DIMENSION / VECTOR_UNIT_WIDTH;
 
-  int input_dtype = get_index_from_type_name<VU_INPUT_TYPES>(input.dtype);
+  int input_dtype = hw_dtype_index<VU_INPUT_TYPES>(input.dtype, "read");
   int input_dtype_width = get_type_width<VU_INPUT_TYPES>(input_dtype);
   int input_fetch_width = OC_DIMENSION * input_dtype_width;
 
@@ -317,7 +317,7 @@ void map_layer_norm(const voyager::Operation& operation, const ScalarEnv& env,
 
   // Fetch weights
   const auto weight = resolve(layer_norm_op, "weight", env);
-  int weight_dtype = get_index_from_type_name<VU_INPUT_TYPES>(weight.dtype);
+  int weight_dtype = hw_dtype_index<VU_INPUT_TYPES>(weight.dtype, "read");
   int weight_dtype_width = get_type_width<VU_INPUT_TYPES>(weight_dtype);
   int weight_fetch_width = OC_DIMENSION * weight_dtype_width;
 
@@ -341,7 +341,7 @@ void map_layer_norm(const voyager::Operation& operation, const ScalarEnv& env,
   const bool has_bias = has_arg(layer_norm_op, "bias");
   if (has_bias) {
     const auto bias = resolve(layer_norm_op, "bias", env);
-    int bias_dtype = get_index_from_type_name<VU_INPUT_TYPES>(bias.dtype);
+    int bias_dtype = hw_dtype_index<VU_INPUT_TYPES>(bias.dtype, "read");
     int bias_dtype_width = get_type_width<VU_INPUT_TYPES>(bias_dtype);
     int bias_fetch_width = OC_DIMENSION * bias_dtype_width;
 
@@ -365,7 +365,7 @@ void map_layer_norm(const voyager::Operation& operation, const ScalarEnv& env,
   vector_params->vector_output_offset = get_address(output);
   vector_params->output_mode = 2;
   vector_params->output_dtype =
-      get_index_from_type_name<OUTPUT_DATATYPES>(output.dtype);
+      hw_dtype_index<OUTPUT_DATATYPES>(output.dtype, "write");
 
   for (int i = 0; i < 3; i++) {
     vector_params->output_loops[0][i] = 1;

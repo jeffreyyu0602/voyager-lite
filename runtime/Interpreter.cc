@@ -127,20 +127,17 @@ long ideal_cycles(const voyager::Operation& operation, const ScalarEnv& env,
 
 Interpreter::Interpreter(const Model& model, MemoryInterface* memory,
                          Backend* backend)
-    : model_(model), memory_(memory), backend_(backend) {
-  // Every semaphore starts at zero. The voyager::zeros that says so may sit
-  // outside the region being run -- selecting a single loop skips it -- so
-  // establish the declared initial state rather than depending on having walked
-  // the op that declares it.
-  for (const auto& node : model_.semaphore_nodes()) {
-    const int64_t slots = semaphore_slots(model_.box(node));
-    for (int64_t slot = 0; slot < slots; slot++) {
-      backend_->init_semaphore(node, slot, 0);
-    }
+    : model_(model), memory_(memory), backend_(backend) {}
+
+void Interpreter::log_counters() const {
+  for (const auto& [id, node] : counters_) {
+    spdlog::info("counter {} ({}) final count: {}\n", id, node,
+                 backend_->counter(id));
   }
 }
 
 void Interpreter::run(const Model::Selection& selection) {
+  lowered_ = &selection.lowered;
   for (const auto* op : selection.ops) {
     // Which top-level ops MAX_TILES bounds is the selection's decision -- it
     // stopped the walk at the loop it bounds -- so read it rather than work
@@ -151,6 +148,16 @@ void Interpreter::run(const Model::Selection& selection) {
     execute_operation(*op);
   }
   bound_current_top_ = true;
+  lowered_ = nullptr;
+}
+
+int64_t Interpreter::eval_threshold(const voyager::ScalarValue& value) const {
+  int64_t threshold = eval_int(value, env_);
+  if (lowered_ != nullptr) {
+    const auto found = lowered_->find(&value);
+    if (found != lowered_->end()) threshold -= found->second;
+  }
+  return threshold;
 }
 
 void Interpreter::execute_region(const voyager::Region& region) {
@@ -176,13 +183,11 @@ void Interpreter::execute_operation(const voyager::Operation& op) {
       } else {
         throw std::runtime_error("Loop with no body: " + op.name());
       }
-      return;  // a loop posts its own semaphore below, via its ops
+      return;
     case voyager::Operation::kCond:
       execute_cond(op, op.cond());
       return;
     case voyager::Operation::kAsync:
-      // A commit carries its own dependency waits and post; it does not use
-      // Operation.semaphore, so it returns rather than falling through below.
       execute_async(op, op.async());
       return;
     default:
@@ -199,12 +204,17 @@ void Interpreter::execute_prim(const voyager::Operation& op,
     // establishes its contents. The executable spec zero-fills integer
     // allocations (torch.zeros) -- the sparse flow's running CSR base is
     // read before any write and counts on it -- while float allocations are
-    // randn junk that nothing may read before writing.
+    // randn junk that nothing may read before writing. A register-level
+    // allocation declares a counter, which the kernel resets with zeros.
     if (op.outputs_size() == 1 && op.outputs(0).has_tensor_box()) {
       const auto& box = op.outputs(0).tensor_box();
+      if (is_counter(box)) {
+        counters_[counter_id(box)] = box.node();
+        return;
+      }
       const bool is_integer =
           box.dtype().rfind("int", 0) == 0 || box.dtype().rfind("uint", 0) == 0;
-      if (is_integer && box.has_memory() && !is_semaphore(box)) {
+      if (is_integer && box.has_memory()) {
         // Each slot's own elements, and nothing else. The span between two
         // slots is the pipelining stride, not this buffer's storage: the
         // planner hands that padding to a buffer whose lifetime is disjoint
@@ -225,32 +235,25 @@ void Interpreter::execute_prim(const voyager::Operation& op,
     execute_zeros(op, prim);
     return;
   }
-  if (target == "voyager::fill") {
-    execute_fill(op, prim);
-    return;
-  }
   if (target == "voyager::async_copy") {
     if (backend_->intercepts_data_ops()) {
       backend_->data_op(op, prim, env_);
     } else {
       run_async_copy(prim, env_, memory_);
     }
-    // The completed transfer signals its slot semaphore, post_count times: a
-    // tile loaded once but consumed by several commits posts once per consumer.
-    const auto sem = prim.kwargs().find("semaphore");
-    if (sem != prim.kwargs().end()) {
-      const auto& ref = sem->second.tensor_box();
-      const int64_t slot = resolve_semaphore_slot(ref, prim.name());
-      const auto post_count = prim.kwargs().find("post_count");
-      const int64_t count = post_count != prim.kwargs().end()
-                                ? eval_int(post_count->second.scalar(), env_)
-                                : 1;
-      backend_->post_semaphore(ref.box().node(), slot, count);
+    // The landed transfer adds 1 to the copy stream's counter.
+    if (has_tensor(prim, "counter")) {
+      backend_->add_counter(counter_id(arg(prim, "counter").tensor_box().box()));
     }
     return;
   }
   if (target == "voyager::async_wait") {
-    execute_async_wait(prim);
+    // The control processor blocks until counter >= threshold. For a
+    // sequential backend the wait must already hold; the Harness blocks the
+    // walk until its completion threads have counted up to it.
+    const auto& box = arg(prim, "counter").tensor_box().box();
+    const int64_t threshold = eval_threshold(arg(prim, "threshold").scalar());
+    backend_->wait_counter(counter_id(box), threshold, prim.name());
     return;
   }
   if (target == "voyager::delinearize_index") {
@@ -380,86 +383,55 @@ Scalar eval_scalar_prim(const voyager::PrimOp& prim, const ScalarEnv& env) {
                          eval(other->second.scalar(), env));
 }
 
+// voyager::zeros writes an existing buffer in place: its `input` operand. A
+// counter is reset to 0; a memory buffer is zero-filled, every slot of it
+// when the operand is the whole allocation.
 void Interpreter::execute_zeros(const voyager::Operation& op,
                                 const voyager::PrimOp& prim) {
-  if (op.outputs_size() != 1 || !op.outputs(0).has_tensor_box()) {
-    throw std::runtime_error("voyager::zeros " + op.name() +
-                             " does not declare a buffer.");
-  }
-  const auto& box = op.outputs(0).tensor_box();
-  if (is_semaphore(box)) {
-    const int64_t slots = semaphore_slots(box);
-    for (int64_t slot = 0; slot < slots; slot++) {
-      backend_->init_semaphore(box.node(), slot, 0);
-    }
+  const voyager::TensorBoxRef* ref = &arg(prim, "input").tensor_box();
+  const voyager::TensorBox& box = ref->box();
+  if (is_counter(box)) {
+    const int64_t id = counter_id(box);
+    counters_[id] = box.node();
+    backend_->reset_counter(id, box.node());
     return;
   }
   if (backend_->intercepts_data_ops()) {
     backend_->data_op(op, prim, env_);
     return;
   }
-  zero_buffer(to_tensor(box), banks_of(box), bank_stride_of(box), memory_);
-}
-
-// A credit-seeded semaphore: unlike voyager::zeros (which starts a semaphore at
-// 0), a fill seeds every slot with `value` credits. That is how an operand
-// reused by several consumers is expressed -- one fill posts N at once, and the
-// N waits each consume one.
-void Interpreter::execute_fill(const voyager::Operation& op,
-                               const voyager::PrimOp& prim) {
-  if (op.outputs_size() != 1 || !op.outputs(0).has_tensor_box()) {
-    throw std::runtime_error("voyager::fill " + op.name() +
-                             " does not declare a buffer.");
-  }
-  const auto& box = op.outputs(0).tensor_box();
-  if (!is_semaphore(box)) {
-    throw std::runtime_error("voyager::fill " + op.name() +
-                             " targets a buffer that is not a semaphore.");
-  }
-  const int64_t value = eval_int(prim.kwargs().at("value").scalar(), env_);
-  const int64_t slots = semaphore_slots(box);
-  for (int64_t slot = 0; slot < slots; slot++) {
-    backend_->post_semaphore(box.node(), slot, value);
+  if (ref->offsets_size() == 0) {
+    zero_buffer(to_tensor(box), banks_of(box), bank_stride_of(box), memory_);
+  } else {
+    zero_buffer(resolve(*ref, env_, op.name()), 1, 0, memory_);
   }
 }
 
-int64_t Interpreter::resolve_semaphore_slot(const voyager::TensorBoxRef& ref,
-                                            const std::string& op_name) {
-  return resolve_bank(ref, env_, op_name);
-}
-
-void Interpreter::execute_async_wait(const voyager::PrimOp& prim) {
-  const auto& ref = prim.kwargs().at("semaphore").tensor_box();
-  const int64_t slot = resolve_semaphore_slot(ref, prim.name());
-  // Consume one credit. For a sequential backend this asserts the credit is
-  // already there (the walk must reach a wait after its producer); for the
-  // Harness it blocks until the completion thread posts.
-  backend_->wait_semaphore(ref.box().node(), slot, 1);
-}
-
-// A commit: dispatch a region asynchronously. Wait every dependency semaphore,
-// run the body, then signal post once the region retires. The walk of the body
-// is identical for every backend -- scalars and conditionals resolve here, and
-// the datapath/host ops flow through backend->execute(). What differs is the
-// backend: a sequential one runs the body in place and end_commit posts
-// immediately; the Harness submits the matrix op to the array now (ramp-up) and
-// defers the tail + post to its completion thread.
+// A commit: dispatch a region asynchronously. Each wait gates one unit's pass
+// on a counter reaching its threshold; the post is the counter the last pass
+// adds 1 to. The walk of the body is identical for every backend -- scalars
+// and conditionals resolve here, and the datapath/host ops flow through
+// backend->execute(). What differs is the backend: a sequential one checks
+// the waits, runs the body in place and adds the post at once; the Harness
+// attaches the waits and the post to the passes the body dispatches.
 void Interpreter::execute_async(const voyager::Operation& op,
                                 const voyager::AsyncOp& async) {
-  for (const auto& dep : async.dependencies()) {
-    const int64_t slot = resolve_semaphore_slot(dep, op.name());
-    backend_->wait_semaphore(dep.box().node(), slot, 1);
+  CommitSync sync;
+  sync.op = op.name();
+  for (const auto& wait : async.waits()) {
+    const auto& box = wait.counter().box();
+    sync.waits.push_back({wait.unit(), counter_id(box),
+                          eval_threshold(wait.threshold()), box.node()});
   }
-
-  backend_->begin_commit();
-  execute_region(async.body());
-
   if (async.has_post()) {
-    const int64_t slot = resolve_semaphore_slot(async.post(), op.name());
-    backend_->end_commit(true, async.post().box().node(), slot, 1);
-  } else {
-    backend_->end_commit(false, "", 0, 0);
+    const auto& box = async.post().box();
+    sync.post = counter_id(box);
+    sync.post_node = box.node();
   }
+
+  backend_->begin_commit(sync);
+  execute_region(async.body());
+  backend_->end_commit();
 }
 
 void Interpreter::execute_for(const voyager::Operation& op,

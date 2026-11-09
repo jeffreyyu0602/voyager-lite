@@ -23,7 +23,7 @@ SC_MODULE(WeightScaleController) {
   Connections::Combinational<MatrixParams> CCS_INIT_S1(writer_params);
   Connections::Combinational<MatrixParams> CCS_INIT_S1(reader_params);
 
-  static constexpr int LOOP_WIDTH = 10;
+  static constexpr int LOOP_WIDTH = MatrixParams::LOOP_WIDTH;
   static constexpr int BLOCK_SIZE = rows > cols ? rows : cols;
 
   SC_CTOR(WeightScaleController) {

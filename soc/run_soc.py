@@ -1,34 +1,41 @@
 # Script to run Voyager simulations
 import os
 import argparse
-import datetime
-import json
 import multiprocessing as mp
 import subprocess
 import re
 import sys
 import time
 
-# This file lives at <voyager repo>/soc/run_voyager.py; resolve through
-# the symlink (sims/vcs/run_voyager.py) so both invocation paths work.
+# This file lives at <voyager repo>/soc/run_soc.py; resolve through
+# the symlink (sims/vcs/run_soc.py) so both invocation paths work.
 VOYAGER_DIR = os.path.abspath(
     os.path.join(os.path.dirname(os.path.realpath(__file__)), "..")
 )
-ACCELERATOR_DIR = VOYAGER_DIR
 JTAG_DIR = os.path.join(VOYAGER_DIR, "soc", "jtag")
 
 # Shared regression helpers live at the voyager repo root, next to
-# run_regression.py (the standalone-accelerator driver).
+# run_accelerator.py (the standalone-accelerator driver).
 sys.path.insert(0, VOYAGER_DIR)
-from regression_common import (
+from common import (
+    DEFAULT_CODEGEN_DIR,
     IDEAL_RUNTIME_PATTERN,
     PASS_PATTERN,
+    SCRATCHPAD_DEFAULTS,
     actual_tile_count,
-    add_layers,
+    add_common_args,
+    build_params,
+    compile_network,
     get_build_folder,
-    get_skip_layers,
+    load_skip_rules,
+    make_results_folder,
+    network_layers,
+    network_settings,
     print_test_results,
 )
+
+# Element width in bits per DATATYPE, which sets the SoC SRAM row width.
+DATATYPE_WIDTH = {"E4M3": 8, "INT8": 8, "MXINT8": 8, "MXNF4": 4}
 
 
 def _wait_for_pattern_in_file(path, pattern, timeout=1800):
@@ -82,8 +89,16 @@ def run_rtl_simulation(
     debug,
     jtag_sim=None,
 ):
-    env_vars["NETWORK"] = model
-    env_vars["TESTS"] = layer
+    riscv_binary = (
+        f"../../tests/voyager/networks/{model}/{config_path}/{layer}.riscv"
+    )
+    # What this run sets on top of the shared environment; simv reads it
+    # from its environment, and the log records it first.
+    overrides = {
+        "NETWORK": model,
+        "TESTS": layer,
+        "RISCV_BINARY": riscv_binary,
+    }
 
     cmd = [
         (
@@ -110,7 +125,6 @@ def run_rtl_simulation(
     if debug:
         cmd.append("+fsdbfile=dump.fsdb")
 
-    riscv_binary = f"../../tests/voyager/networks/{model}/{config_path}/{layer}.riscv"
     vcs_err = f"{output_folder}/{model}_{layer}.err"
     vcs_log = f"{output_folder}/{model}_{layer}.log"
     openocd_log = f"{output_folder}/{model}_{layer}_openocd.log"
@@ -118,12 +132,10 @@ def run_rtl_simulation(
     scratchpad_bin = f"{output_folder}/{model}_{layer}_scratchpad.bin"
     checker_log = f"{output_folder}/{model}_{layer}_checker.log"
 
-    env_vars["RISCV_BINARY"] = riscv_binary
-
     # Full JTAG mode: the emitter lists the scratchpad regions the grade
     # needs; GDB reads back only those and the checker loads them.
     if jtag_sim == "full":
-        env_vars["SCRATCHPAD_DUMP_LIST"] = (
+        overrides["SCRATCHPAD_DUMP_LIST"] = (
             f"{VOYAGER_DIR}/soc/firmware/networks/{model}/{config_path}"
             f"/{layer}_scratchpad_dump.txt"
         )
@@ -131,7 +143,13 @@ def run_rtl_simulation(
         # The testbench services the firmware's requests out of a mailbox in
         # the firmware's own memory; its address is wherever the linker put
         # it in this layer's ELF.
-        env_vars["HOST_MAILBOX"] = hex(elf_symbol_address(riscv_binary, "host_mailbox"))
+        overrides["HOST_MAILBOX"] = hex(
+            elf_symbol_address(riscv_binary, "host_mailbox")
+        )
+    env_vars = {**env_vars, **overrides}
+    run_header = "".join(
+        f"# {name}={value}\n" for name, value in overrides.items()
+    )
 
     if jtag_sim is None:
         cmd.extend([
@@ -144,6 +162,8 @@ def run_rtl_simulation(
         ])
 
         with open(vcs_log, "w") as log_file, open(vcs_err, "w") as err_file:
+            log_file.write(run_header)
+            log_file.flush()
             subprocess.run(
                 cmd,
                 env=env_vars,
@@ -161,6 +181,8 @@ def run_rtl_simulation(
         ])
 
         with open(vcs_log, "w") as log_file, open(vcs_err, "w") as err_file:
+            log_file.write(run_header)
+            log_file.flush()
             vcs_proc = subprocess.Popen(
                 cmd, env=env_vars, stdout=log_file, stderr=err_file
             )
@@ -220,8 +242,9 @@ def run_rtl_simulation(
 
         # Step 5: Run jtag_sim_checker on the scratchpad dump
         if jtag_sim == "full":
-            build_dir = get_build_folder(env_vars)
-            checker_bin = f"{ACCELERATOR_DIR}/{build_dir}/cc/jtag_sim_checker"
+            checker_bin = os.path.join(
+                VOYAGER_DIR, get_build_folder(env_vars), "cc", "jtag_sim_checker"
+            )
             with open(checker_log, "w") as clf:
                 subprocess.run(
                     [checker_bin, scratchpad_bin],
@@ -230,7 +253,7 @@ def run_rtl_simulation(
                     stderr=subprocess.STDOUT,
                 )
 
-    return check_rtl_simulation_result(
+    return grade_simulation(
         model,
         layer,
         layer_count,
@@ -240,7 +263,7 @@ def run_rtl_simulation(
     )
 
 
-def check_rtl_simulation_result(
+def grade_simulation(
     model,
     layer,
     layer_count,
@@ -338,7 +361,7 @@ def run_rtl_simulations(
     return print_test_results(test_results, layers, results_folder)
 
 
-def check_rtl_simulation_results(
+def regrade_results_folder(
     layers,
     layer_counts,
     tile_counts,
@@ -350,7 +373,7 @@ def check_rtl_simulation_results(
     for model, tests in layers.items():
         for test in tests:
             test_results.append(
-                check_rtl_simulation_result(
+                grade_simulation(
                     model,
                     test,
                     layer_counts[model][test],
@@ -428,117 +451,25 @@ def inject_power_pins(testharness_sv_path):
     print(f"Power pins injected into {testharness_sv_path}.")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Run Voyager simulations")
-    parser.add_argument(
-        "--models",
-        required=True,
-        help="Model(s) to test for regression (resnet18, mobilebert)",
-    )
-    parser.add_argument(
-        "--tests",
-        default=None,
-        help="Comma separated list of tests to run (e.g. test1,test2)",
-    )
-    parser.add_argument(
-        "--num_processes",
-        type=int,
-        default=16,
-        help="Number of processes to run in parallel",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Run the simulation in debug mode to generate waveforms",
-    )
-    parser.add_argument("--config", required=True, help="SoC config name")
-    parser.add_argument(
-        "--uniquify_layers",
-        action="store_true",
-        help="Whether to remove duplicated layers in the model",
-    )
-    parser.add_argument(
-        "--skip_layers",
-        action="store_true",
-        help="Whether to skip layers specified in the skip_rules.json",
-    )
-    parser.add_argument(
-        "--jtag-mode",
-        choices=["full", "program", "vpi"],
-        default=None,
-        help=(
-            "Run via JTAG interface. "
-            "'full': program and data both loaded via JTAG. "
-            "'program': program loaded via JTAG, data via VPI. "
-            "'vpi': program and data both via VPI, JTAG for startup control only."
-        ),
-    )
-    parser.add_argument(
-        "--gl_netlist",
-        default=None,
-        help="Path to the GL netlist to use for GL simulation.",
-    )
-    parser.add_argument(
-        "--gl_pwr_pins",
-        action="store_true",
-        help=(
-            "Inject VSS/VDDPST/VDD supply declarations and power pin connections into "
-            "TestHarness.sv for GL simulation with a power-aware netlist. "
-            "Adds +define+GL_PWR_PINS to VCS compilation."
-        ),
-    )
-    parser.add_argument(
-        "--results_folder",
-        default=None,
-        help="Existing regression results folder to parse.",
-    )
-    parser.add_argument(
-        "--semihosting",
-        action="store_true",
-        help=(
-            "Route printf through RISC-V semihosting instead of suppressing it. "
-            "Requires --jtag-mode. Output appears in the OpenOCD log."
-        ),
-    )
-    parser.add_argument(
-        "--build-only",
-        action="store_true",
-        help=(
-            "Stop once the firmware is linked: compile the networks that have "
-            "no model.txt, emit and link every layer, run nothing. No Verilog "
-            "is generated and no simulator is built."
-        ),
-    )
-    args = parser.parse_args()
-    args.models = [s.strip() for s in args.models.split(",")]
-
-    if args.results_folder is None:
-        # Create directory with current time
-        current_time = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-        results_folder = "regression_results/" + current_time
-        os.makedirs(results_folder)
-        # create softlink to latest results (delete old if exists)
-        os.system("rm -f regression_results/latest")
-        os.system(f"cd regression_results && ln -sf {current_time} latest")
-    else:
-        results_folder = args.results_folder
-
-    # Set environment variables
+def base_environment(args):
+    """The run's environment before the SoC config is elaborated: the
+    config, the gold-vs-DUT grade, the compile folders, the scratchpad
+    geometry and the JTAG mode's settings."""
     env_vars = os.environ.copy()
     env_vars["CONFIG"] = args.config
     # The SoC flow always grades the DUT against the gold walk; force it so a
     # stale exported SIMS cannot leak into the simv process.
     env_vars["SIMS"] = "gold,accelerator"
-    env_vars["PROJECT_ROOT"] = ACCELERATOR_DIR
-    env_vars["CODEGEN_DIR"] = "build/codegen"
-    env_vars["NETWORK"] = args.models[0]
+    env_vars["PROJECT_ROOT"] = VOYAGER_DIR
+    env_vars["CODEGEN_DIR"] = DEFAULT_CODEGEN_DIR
 
     # SCRATCHPAD_SIZE is the whole physical L2 SRAM the compiler plans into
     # (software-pipelined buffers get slots of it); it must equal the SoC
     # scratchpad the Chipyard config instantiates.
-    scratchpad_size = int(env_vars.setdefault("SCRATCHPAD_SIZE", "2097152"))
-    scratchpad_offset = int(env_vars.setdefault("SCRATCHPAD_OFFSET", "0"))
-    num_banks = int(env_vars.setdefault("NUM_BANKS", "16"))
+    for name, value in SCRATCHPAD_DEFAULTS.items():
+        env_vars.setdefault(name, value)
+    scratchpad_size = int(env_vars["SCRATCHPAD_SIZE"])
+    scratchpad_offset = int(env_vars["SCRATCHPAD_OFFSET"])
 
     # The SoC targets require the IC=3 first conv lowered via im2col; the
     # channel-replication conv path is not supported here (see
@@ -566,29 +497,31 @@ def main():
     if args.jtag_mode is not None and args.semihosting:
         env_vars["SEMIHOSTING"] = "1"
 
-    if args.results_folder is None and not args.build_only:
-        # Generate SoC verilog
-        print("Generating verilog...")
-        with open(f"{results_folder}/verilog_generation.log", "w") as log_file:
-            subprocess.run(
-                ["make", "verilog"],
-                env=env_vars,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                check=True,
-            )
+    return env_vars
 
-    if args.gl_pwr_pins:
-        testharness_sv_path = os.path.join(
-            "generated-src",
-            f"chipyard.harness.TestHarness.{args.config}",
-            "gen-collateral", "TestHarness.sv",
+
+def generate_verilog(env_vars, results_folder):
+    """Elaborate the SoC config (``make verilog``), which also writes its
+    ``config.sh``."""
+    # Generate SoC verilog
+    print("Generating verilog...")
+    with open(f"{results_folder}/verilog_generation.log", "w") as log_file:
+        subprocess.run(
+            ["make", "verilog"],
+            env=env_vars,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            check=True,
         )
-        inject_power_pins(testharness_sv_path)
 
+
+def add_config_environment(args, env_vars):
+    """Add the SoC config's parameters (its ``config.sh``) to
+    ``env_vars``, with the simulator's defines and the SRAM row width they
+    imply."""
     # Set the environment variables from the sh file
     sim_cxxflags = []
-    with open(f"{ACCELERATOR_DIR}/build/configs/{args.config}/config.sh", "r") as f:
+    with open(f"{VOYAGER_DIR}/build/configs/{args.config}/config.sh", "r") as f:
         for line in f:
             if (match := re.match(r"export\s+(\w+)=(.*)", line.strip())) is None:
                 continue
@@ -625,90 +558,58 @@ def main():
     # Set the memory banking configuration for the compiler
     # accesses need to be aligned to accelerator's data width
     # width of datatype * 2 * max(IC,OC)
-    if env_vars["DATATYPE"] == "E4M3":
-        datatype_width = 8
-    elif env_vars["DATATYPE"] == "INT8":
-        datatype_width = 8
-    elif env_vars["DATATYPE"] == "MXINT8":
-        datatype_width = 8
-    elif env_vars["DATATYPE"] == "MXNF4":
-        datatype_width = 4
-    else:
+    if env_vars["DATATYPE"] not in DATATYPE_WIDTH:
         raise ValueError(
-            f"Unknown width for DATATYPE: {env_vars['DATATYPE']}. Please add it to run_voyager.py"
+            f"Unknown width for DATATYPE: {env_vars['DATATYPE']}. Please add it to run_soc.py"
         )
+    datatype_width = DATATYPE_WIDTH[env_vars["DATATYPE"]]
 
     # BANK_WIDTH here describes the SoC SRAM row width for the testbench's VPI
-    # backdoor addressing (SoCMemory) — the compiler-side --bank_width is now
-    # computed by the accelerator's codegen.mk and no longer injected from here.
+    # backdoor addressing (SoCMemory) — the compiler-side
+    # --scratchpad_word_bytes is now computed by the accelerator's codegen.mk
+    # and no longer injected from here.
     min_unroll = min(int(env_vars["IC_DIMENSION"]), int(env_vars["OC_DIMENSION"]))
     bank_width = int(datatype_width * min_unroll / 8)
 
     env_vars.setdefault("BANK_WIDTH", str(bank_width))
     env_vars.setdefault("SPDLOG_LEVEL", "DEBUG")
 
-    # Compile the model(s) and get list of layers
+
+def list_layers(args, env_vars, compile_first):
+    """The layers to run: ``--tests``, else each network's ``layers.txt``,
+    compiled first when ``compile_first``.
+
+    Returns:
+        ``(layers, layer_counts, tile_counts)``, by network.
+    """
     layers = {}
     layer_counts = {}
     tile_counts = {}
-    skip_rules = []
-
-    if args.skip_layers:
-        with open(f"{ACCELERATOR_DIR}/ci/skip_rules.json", "r") as f:
-            skip_rules = json.load(f)
-
-    if args.tests is None:
-        for network in args.models:
-            env_vars["NETWORK"] = network
-            subprocess.run(
-                ["make", "-C", ACCELERATOR_DIR, "network-proto"],
-                env=env_vars,
-                check=True,
-            )
-            datatype = env_vars["DATATYPE"]
-            block_size = max(
-                int(env_vars["OC_DIMENSION"]), int(env_vars["IC_DIMENSION"])
-            )
-            skip_layers = get_skip_layers(
-                skip_rules, network, datatype, "rtl", block_size
-            )
-            add_layers(
-                network,
-                layers,
-                layer_counts,
-                tile_counts,
-                args.uniquify_layers,
-                skip_layers,
-                codegen_root=f"{ACCELERATOR_DIR}/build/codegen",
-                datatype=env_vars["DATATYPE"],
-            )
-    else:
+    if args.tests is not None:
         assert (
             len(args.models) == 1
         ), "Only one model can be specified when using --tests"
         layers[args.models[0]] = args.tests.split(",")
         layer_counts[args.models[0]] = {layer: 1 for layer in layers[args.models[0]]}
         tile_counts[args.models[0]] = {test: 1 for test in layers[args.models[0]]}
+        return layers, layer_counts, tile_counts
+    options = {
+        "env": env_vars,
+        "sim_type": "rtl",
+        "codegen_root": os.path.join(VOYAGER_DIR, env_vars["CODEGEN_DIR"]),
+        "skip_rules": load_skip_rules(VOYAGER_DIR, args.skip_layers),
+        "uniquify": args.uniquify_layers,
+    }
+    for network in args.models:
+        if compile_first:
+            compile_network(network, repo_dir=VOYAGER_DIR, env=env_vars)
+        network_layers(network, layers, layer_counts, tile_counts, **options)
+    return layers, layer_counts, tile_counts
 
-    config_path = (
-        f"{env_vars['DATATYPE']}/"
-        f"{env_vars['IC_DIMENSION']}x{env_vars['OC_DIMENSION']}_"
-        f"{env_vars['INPUT_BUFFER_SIZE']}x{env_vars['WEIGHT_BUFFER_SIZE']}x{env_vars['ACCUM_BUFFER_SIZE']}_"
-        f"{env_vars['DOUBLE_BUFFERED_ACCUM_BUFFER']}_"
-        f"{env_vars['SUPPORT_MVM']}_"
-        f"{env_vars['SUPPORT_SPMM']}"
-    )
 
-    if args.results_folder is not None:
-        success = check_rtl_simulation_results(
-            layers,
-            layer_counts,
-            tile_counts,
-            results_folder,
-            args.jtag_mode,
-        )
-        exit(0 if success else 1)
-
+def build_simulator(args, env_vars, results_folder):
+    """Build the simv (``make default``, or ``debug`` for waveforms) and, in
+    full JTAG mode, the scratchpad checker."""
     # Build the simulation binary
     print("Building the simulation binary...")
     with open(f"{results_folder}/sim_build.log", "w") as log_file:
@@ -732,16 +633,27 @@ def main():
                 check=True,
             )
 
+
+def build_firmware(args, env_vars, layers, config_path, results_folder):
+    """Emit each network's firmware (``GenerateSoCBinaries``), keep the
+    layers that emitted in ``layers``, and link each layer's ELF."""
     # Generate the SoC C driver code
     print("Generating the SoC C driver code...")
     with open(f"{results_folder}/driver_code_gen.log", "w") as log_file:
         for network in args.models:
-            env_vars["NETWORK"] = network
-            env_vars["TESTS"] = ",".join(layers[network])
+            # The network and its layers go on make's command line, which
+            # make exports to the emitter; the log records them first.
+            overrides = [
+                *network_settings(network, VOYAGER_DIR),
+                f"TESTS={','.join(layers[network])}",
+            ]
+            log_file.write("".join(f"# {o}\n" for o in overrides))
+            log_file.flush()
 
             gen_start = time.time() - 1
             subprocess.run(
-                ["make",  "-C", f"{VOYAGER_DIR}/soc/", "GenerateSoCBinaries"],
+                ["make", "-C", f"{VOYAGER_DIR}/soc/", "GenerateSoCBinaries"]
+                + overrides,
                 env=env_vars,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
@@ -782,9 +694,13 @@ def main():
                 if args.jtag_mode is not None and not args.semihosting:
                     extra_cflags.append("-DSUPPRESS_PRINTF")
                 # Full JTAG mode has no testbench: the image is preloaded, so
-                # the firmware's requests and waits compile to nothing.
+                # the firmware performs its copies' counter adds itself.
                 if args.jtag_mode == "full":
                     extra_cflags.append("-DNO_TESTBENCH")
+                # A DRAM config's firmware moves its copies with the DMA
+                # engine, unless --mailbox keeps them on the testbench.
+                if env_vars.get("HW_DMA") == "true" and not args.mailbox:
+                    extra_cflags.append("-DHW_DMA")
                 # PLIC ids run in device order, so a config without the UART
                 # (which takes id 1) moves Voyager down to it. The firmware
                 # defaults to the id the UART-bearing configs give it.
@@ -808,6 +724,104 @@ def main():
                     check=True,
                 )
 
+
+def main():
+    parser = argparse.ArgumentParser(description="Run Voyager simulations")
+    add_common_args(parser, num_processes=16)
+    parser.add_argument("--config", required=True, help="SoC config name")
+    parser.add_argument(
+        "--jtag-mode",
+        choices=["full", "program", "vpi"],
+        default=None,
+        help=(
+            "Run via JTAG interface. "
+            "'full': program and data both loaded via JTAG. "
+            "'program': program loaded via JTAG, data via VPI. "
+            "'vpi': program and data both via VPI, JTAG for startup control only."
+        ),
+    )
+    parser.add_argument(
+        "--gl_netlist",
+        default=None,
+        help="Path to the GL netlist to use for GL simulation.",
+    )
+    parser.add_argument(
+        "--gl_pwr_pins",
+        action="store_true",
+        help=(
+            "Inject VSS/VDDPST/VDD supply declarations and power pin connections into "
+            "TestHarness.sv for GL simulation with a power-aware netlist. "
+            "Adds +define+GL_PWR_PINS to VCS compilation."
+        ),
+    )
+    parser.add_argument(
+        "--results_folder",
+        default=None,
+        help="Existing regression results folder to parse.",
+    )
+    parser.add_argument(
+        "--semihosting",
+        action="store_true",
+        help=(
+            "Route printf through RISC-V semihosting instead of suppressing it. "
+            "Requires --jtag-mode. Output appears in the OpenOCD log."
+        ),
+    )
+    parser.add_argument(
+        "--mailbox",
+        action="store_true",
+        help=(
+            "On a DRAM config, serve the copies from the testbench mailbox "
+            "instead of the DMA engine."
+        ),
+    )
+    parser.add_argument(
+        "--build-only",
+        action="store_true",
+        help=(
+            "Stop once the firmware is linked: compile the networks that have "
+            "no model.txt, emit and link every layer, run nothing. No Verilog "
+            "is generated and no simulator is built."
+        ),
+    )
+    args = parser.parse_args()
+
+    if args.results_folder is None:
+        results_folder = make_results_folder()
+    else:
+        results_folder = args.results_folder
+
+    env_vars = base_environment(args)
+    if args.results_folder is not None:
+        # A re-parse only grades the logs already there.
+        add_config_environment(args, env_vars)
+        layers, layer_counts, tile_counts = list_layers(
+            args, env_vars, compile_first=False
+        )
+        success = regrade_results_folder(
+            layers, layer_counts, tile_counts, results_folder, args.jtag_mode
+        )
+        exit(0 if success else 1)
+
+    if not args.build_only:
+        generate_verilog(env_vars, results_folder)
+    if args.gl_pwr_pins:
+        inject_power_pins(
+            os.path.join(
+                "generated-src",
+                f"chipyard.harness.TestHarness.{args.config}",
+                "gen-collateral",
+                "TestHarness.sv",
+            )
+        )
+    add_config_environment(args, env_vars)
+    layers, layer_counts, tile_counts = list_layers(
+        args, env_vars, compile_first=True
+    )
+    config_path = f"{env_vars['DATATYPE']}/{build_params(env_vars)}"
+
+    build_simulator(args, env_vars, results_folder)
+    build_firmware(args, env_vars, layers, config_path, results_folder)
     if args.build_only:
         total = sum(len(v) for v in layers.values())
         print(f"--build-only: {total} layer(s) linked under tests/voyager/networks/, nothing run.")

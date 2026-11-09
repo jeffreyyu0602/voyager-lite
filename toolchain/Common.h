@@ -18,6 +18,20 @@ constexpr int MAX_LOOP_VALUE = 65535;
 // rest of the tile.
 constexpr int MAX_VECTOR_LOOP_VALUE = (1 << 11) - 1;
 
+// The index of `dtype` in the types Ts a unit can read (an input list) or
+// write (an output list); `access` names which. Another type is an error: its
+// -1 would wrap to an index the params' dtype field cannot hold, and the unit
+// would misread its operand or drop every output word.
+template <typename... Ts>
+int hw_dtype_index(const std::string& dtype, const std::string& access) {
+  const int index = get_index_from_type_name<Ts...>(dtype);
+  if (index == -1) {
+    throw std::runtime_error("dtype " + dtype +
+                             " is not one the hardware can " + access);
+  }
+  return index;
+}
+
 const voyager::PrimOp* get_fused_producer(const voyager::Operation& operation,
                                           const ScalarEnv& env,
                                           const Tensor& tensor) {
@@ -603,7 +617,7 @@ void push_mx_scale_pass(const voyager::PrimOp& op, const ScalarEnv& env,
   VectorInstructionConfig* vector_instruction_config =
       new VectorInstructionConfig;
 
-  int input_dtype = get_index_from_type_name<VU_INPUT_TYPES>(input.dtype);
+  int input_dtype = hw_dtype_index<VU_INPUT_TYPES>(input.dtype, "read");
   int input_dtype_width = get_type_width<VU_INPUT_TYPES>(input_dtype);
   int input_fetch_width = ACCUMULATOR_WIDTH * input_dtype_width;
 
@@ -689,7 +703,7 @@ void push_mx_scale_pass(const voyager::PrimOp& op, const ScalarEnv& env,
   }
 
   vector_params->output_dtype =
-      get_index_from_type_name<OUTPUT_DATATYPES>(scale.dtype);
+      hw_dtype_index<OUTPUT_DATATYPES>(scale.dtype, "write");
 
   int loop_count = get_size(input) / ACCUMULATOR_WIDTH;
 

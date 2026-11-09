@@ -69,7 +69,7 @@ SC_MODULE(OutputController) {
 #endif
   Connections::SyncOut CCS_INIT_S1(done);
 
-  static constexpr int LOOP_WIDTH = 16;
+  static constexpr int LOOP_WIDTH = VectorParams::LOOP_WIDTH;
 
   SC_CTOR(OutputController) {
     SC_THREAD(write_vector_output);

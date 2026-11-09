@@ -3,13 +3,7 @@
         "datatype": "MXNF4",
         "model": [
             "llama_decode",
-            "llama_decode_mp",
-            "llama_decode_kivi",
-            "amd135m_decode_kivi",
-            "qwama_decode_kivi",
-            "llama2_7b_verify",
-            "llama2_7b_decode_kivi",
-            "llama31_8b_verify"
+            "llama_decode_kivi"
         ],
         "sim_type": [
             "gold_model",
@@ -19,9 +13,6 @@
         ],
         "block_size": "*",
         "layers": [
-            "quantize_default",
-            "add",
-            "add_1",
             "le",
             "where",
             "matmul",
@@ -29,10 +20,51 @@
             "mul",
             "sin",
             "mul_1",
-            "add_6",
-            "sub",
             "key_cache_0_fold",
             "value_cache_0_fold"
+        ]
+    },
+    {
+        "datatype": "MXNF4",
+        "model": [
+            "llama_prefill",
+            "llama_prefill_mp",
+            "llama_prefill_spmm"
+        ],
+        "sim_type": [
+            "gold_model",
+            "systemc",
+            "fast-systemc",
+            "rtl"
+        ],
+        "block_size": "*",
+        "layers": [
+            "add",
+            "add_1",
+            "le_2",
+            "where",
+            "matmul",
+            "cos",
+            "mul",
+            "sin",
+            "mul_1"
+        ]
+    },
+    {
+        "datatype": "*",
+        "model": [
+            "bert"
+        ],
+        "sim_type": [
+            "gold_model",
+            "systemc",
+            "fast-systemc",
+            "rtl"
+        ],
+        "block_size": "*",
+        "layers": [
+            "and_2",
+            "where"
         ]
     }
 ]

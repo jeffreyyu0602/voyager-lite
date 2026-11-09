@@ -1,2 +1,2 @@
 set block "MatrixParamsDeserializer"
-set full_block_name "MatrixParamsDeserializer<0, [expr {$SUPPORT_MX ? 6 : 4}]>"
+set full_block_name "MatrixParamsDeserializer<0, 1>"

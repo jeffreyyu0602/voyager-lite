@@ -30,11 +30,14 @@ struct Tensor {
   bool materialized = true;
   bool is_constant = false;
 
-  // A pitched window into a larger allocation: rows of shape.back() valid
-  // elements sit window_pitch elements apart, the first starting window_col
-  // elements into its row. 0 = contiguous.
+  // A pitched window into a larger allocation: runs of window_run valid
+  // elements (shape.back() when 0) sit window_pitch elements apart, the
+  // first starting window_col elements into its pitch. A run longer than
+  // shape.back() spans whole rows: a partial dim followed by whole ones.
+  // window_pitch 0 = contiguous.
   int64_t window_pitch = 0;
   int64_t window_col = 0;
+  int64_t window_run = 0;
 };
 
 inline long get_size(const std::vector<int>& shape) {

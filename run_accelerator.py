@@ -1,27 +1,36 @@
 import argparse
 import concurrent.futures
-import datetime
-import json
 import multiprocessing as mp
 import os
 import subprocess
 import pandas as pd
 import re
+import shlex
 import signal
 import sys
 
-from regression_common import (
+from common import (
+    DEFAULT_CODEGEN_DIR,
     IDEAL_RUNTIME_PATTERN,
     PASS_PATTERN,
     actual_tile_count,
-    add_layers,
+    add_common_args,
     check_environment_vars,
+    compile_network,
     get_build_folder,
-    get_skip_layers,
+    get_catapult_folder,
+    load_skip_rules,
+    make_results_folder,
+    network_layers,
+    network_settings,
     print_test_results,
+    run_logged,
     run_with_timeout,
     set_default_env_vars,
 )
+
+# The repository root, whose codegen.mk compiles the networks.
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 ACCURACY_RESULTS = {
     "resnet18": {
@@ -69,128 +78,59 @@ ACCURACY_RESULTS = {
 }
 
 
-def network_env(network):
-    """Returns os.environ plus NETWORK and the network's compile settings.
+def run_unit_test(model, layer, output_folder, target, sims, timeout):
+    """Run one layer through ``make <target>`` with ``SIMS=<sims>`` and grade
+    its log with ``PASS_PATTERN``.
 
-    A network compiled with its own settings keeps them in
-    ci/networks/<network>.env, one KEY=VALUE per line (MODE, CHECKPOINT,
-    QCONFIG, EXTRA_COMPILER_FLAGS). Every make call for the network needs
-    them, because codegen.mk checks them against the compiled folder.
+    Returns:
+        ``(model, layer, passed)``.
     """
     env_vars = os.environ.copy()
-    env_vars["NETWORK"] = network
-    settings_file = f"ci/networks/{network}.env"
-    if os.path.exists(settings_file):
-        with open(settings_file) as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    key, value = line.split("=", 1)
-                    env_vars[key] = value
-    return env_vars
-
-
-def run_gold_model_unit_test(model, layer, output_folder):
-    env_vars = network_env(model)
     env_vars["TESTS"] = layer
     env_vars["CLOCK_PERIOD"] = "1"
-    env_vars["SIMS"] = "gold,pytorch"
+    env_vars["SIMS"] = sims
 
-    with open(f"{output_folder}/{model}_{layer}.log", "w") as stdout_file:
-        if not run_with_timeout(["make", "sim"], env_vars, stdout_file, 20 * 60):
-            print(f"Test {model}_{layer} timed out")
-            stdout_file.write("Test timed out")
-
-    # search if the test passed
-    p = subprocess.Popen(
-        ["grep", "Error count: 0", f"{output_folder}/{model}_{layer}.log"],
-        stdout=subprocess.PIPE,
-    )
-    p.communicate()
-
-    return (model, layer, p.returncode == 0)
-
-
-def run_gold_model_tests(layers, num_processes, results_folder):
-    check_environment_vars(["DATATYPE", "IC_DIMENSION", "OC_DIMENSION"])
-
-    # Build TestRunner binary
-    # subprocess.run(["make", "clean"], env=env_vars)
-
-    with open(f"{results_folder}/build.log", "w") as stdout_file:
-        subprocess.run(
-            ["make", "-j", "TestRunner"],
-            env=os.environ,
-            stdout=stdout_file,
-            stderr=subprocess.STDOUT,
-        )
-
-    pool = mp.Pool(num_processes)
-
-    def signal_handler(signum, frame):
-        print(f"Receive signal {signum}, terminating pool...")
-        pool.terminate()
-        pool.join()
-        sys.exit(1)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-    test_results = []
-
-    for model, tests in layers.items():
-        for test in tests:
-            pool.apply_async(
-                run_gold_model_unit_test,
-                args=(model, test, results_folder),
-                callback=test_results.append,
-            )
-
-    pool.close()
-    pool.join()
-
-    return print_test_results(test_results, layers, results_folder)
-
-
-def run_systemc_unit_test(model, layer, output_folder, fast):
-    env_vars = network_env(model)
-    env_vars["TESTS"] = layer
-    env_vars["CLOCK_PERIOD"] = "1"
-    env_vars["SIMS"] = "gold,accelerator"
-
-    with open(f"{output_folder}/{model}_{layer}.log", "w") as stdout_file:
+    log_path = f"{output_folder}/{model}_{layer}.log"
+    with open(log_path, "w") as stdout_file:
         if not run_with_timeout(
-            ["make", "fast-sim" if fast else "sim"],
+            ["make", target, *network_settings(model, REPO_DIR)],
             env_vars,
             stdout_file,
-            4 * 60 * 60,
+            timeout,
         ):
             print(f"Test {model}_{layer} timed out")
             stdout_file.write("Test timed out")
 
-    # search if the test passed
-    p = subprocess.Popen(
-        ["grep", "Error count: 0", f"{output_folder}/{model}_{layer}.log"],
-        stdout=subprocess.PIPE,
-    )
-    p.communicate()
-
-    return (model, layer, p.returncode == 0)
+    with open(log_path) as log_file:
+        passed = bool(re.search(PASS_PATTERN, log_file.read()))
+    return (model, layer, passed)
 
 
-def run_systemc_tests(layers, num_processes, results_folder, fast):
+def run_unit_tests(
+    layers,
+    num_processes,
+    results_folder,
+    *,
+    build_target,
+    target,
+    sims,
+    timeout,
+    clean,
+):
+    """Build ``build_target`` (after ``make clean`` when ``clean``), then run
+    every layer of ``layers`` through ``run_unit_test`` on
+    ``num_processes`` processes.
+
+    Returns:
+        Whether every layer passed (``print_test_results``).
+    """
     check_environment_vars(["DATATYPE", "IC_DIMENSION", "OC_DIMENSION"])
 
-    # Build TestRunner binary
-    subprocess.run(["make", "clean"], env=os.environ)
-
-    with open(f"{results_folder}/build.log", "w") as stdout_file:
-        subprocess.run(
-            ["make", "-j", "TestRunner-fast" if fast else "TestRunner"],
-            env=os.environ,
-            stdout=stdout_file,
-            stderr=subprocess.STDOUT,
-        )
+    if clean:
+        subprocess.run(["make", "clean"], env=os.environ, check=True)
+    run_logged(
+        ["make", "-j", build_target], f"{results_folder}/build.log", os.environ
+    )
 
     pool = mp.Pool(num_processes)
 
@@ -208,8 +148,8 @@ def run_systemc_tests(layers, num_processes, results_folder, fast):
     for model, tests in layers.items():
         for test in tests:
             pool.apply_async(
-                run_systemc_unit_test,
-                args=(model, test, results_folder, fast),
+                run_unit_test,
+                args=(model, test, results_folder, target, sims, timeout),
                 callback=test_results.append,
             )
 
@@ -220,7 +160,7 @@ def run_systemc_tests(layers, num_processes, results_folder, fast):
 
 
 def run_rtl_test(model, layer, layer_count, num_tiles, output_folder, debug):
-    env_vars = network_env(model)
+    env_vars = os.environ.copy()
     env_vars["TESTS"] = layer
     env_vars["SIMS"] = "gold,accelerator"
 
@@ -233,18 +173,25 @@ def run_rtl_test(model, layer, layer_count, num_tiles, output_folder, debug):
     # order to run dependencies installed from conda.
     env_vars["LD_PRELOAD"] = env_vars["CONDA_PREFIX"] + "/lib/libstdc++.so.6"
     set_default_env_vars(env_vars)
-    build_folder = get_build_folder(env_vars)
 
     # we occasionally see the test fail due to filesystem issues ("no rule to
     # make target", but the target exists), so we retry up to 3 times
     for attempt in range(3):
         with open(f"{output_folder}/{model}_{layer}.log", "w") as stdout_file:
             if not run_with_timeout(
-                ["make", "-f", "scverify/Verify_concat_sim_rtl_v_vcs.mk", "sim"],
+                [
+                    "make",
+                    "-f",
+                    "scverify/Verify_concat_sim_rtl_v_vcs.mk",
+                    "sim",
+                    *network_settings(model, REPO_DIR),
+                ],
                 env_vars,
                 stdout_file,
                 10 * 60 * 60,
-                cwd=f"{build_folder}/Catapult/{env_vars['TECHNOLOGY']}/clock_{env_vars['CLOCK_PERIOD']}/Accelerator/Accelerator.v1",
+                cwd=os.path.join(
+                    get_catapult_folder(env_vars), "Accelerator/Accelerator.v1"
+                ),
             ):
                 print(f"Test {model}_{layer} timed out")
                 stdout_file.write("Test timed out")
@@ -286,7 +233,7 @@ def run_rtl_test(model, layer, layer_count, num_tiles, output_folder, debug):
             match = re.search(IDEAL_RUNTIME_PATTERN, content, flags=re.IGNORECASE)
 
             runtime_type = match.group(1).lower()
-            clock_period = float(os.environ.get("CLOCK_PERIOD", "5.0"))
+            clock_period = float(env_vars["CLOCK_PERIOD"])
             ideal_runtime = int(round(int(match.group(2)) * clock_period))
 
     return (
@@ -317,22 +264,27 @@ def run_rtl_tests(
 
     print(f"Building VCS simulation binary using {model} {test}")
 
-    env_vars = network_env(model)
+    env_vars = os.environ.copy()
     env_vars["TESTS"] = test
     env_vars["SIMS"] = "gold,accelerator"
     env_vars["LD_PRELOAD"] = env_vars["CONDA_PREFIX"] + "/lib/libstdc++.so.6"
     set_default_env_vars(env_vars)
-    build_folder = get_build_folder(env_vars)
 
     # build VCS simulation binary
-    with open(f"{results_folder}/vcs_build.log", "w") as stdout_file:
-        subprocess.run(
-            ["make", "-f", "scverify/Verify_concat_sim_rtl_v_vcs.mk", "build"],
-            cwd=f"{build_folder}/Catapult/{env_vars['TECHNOLOGY']}/clock_{env_vars['CLOCK_PERIOD']}/Accelerator/Accelerator.v1",
-            env=env_vars,
-            stdout=stdout_file,
-            stderr=subprocess.STDOUT,
-        )
+    run_logged(
+        [
+            "make",
+            "-f",
+            "scverify/Verify_concat_sim_rtl_v_vcs.mk",
+            "build",
+            *network_settings(model, REPO_DIR),
+        ],
+        f"{results_folder}/vcs_build.log",
+        env_vars,
+        cwd=os.path.join(
+            get_catapult_folder(env_vars), "Accelerator/Accelerator.v1"
+        ),
+    )
 
     pool = mp.Pool(num_processes)
 
@@ -370,7 +322,7 @@ def run_rtl_tests(
 
 def build_rtl(results_folder, keep_build, env_vars):
     if not keep_build:
-        subprocess.run(["make", "clean-catapult"], env=env_vars)
+        subprocess.run(["make", "clean-catapult"], env=env_vars, check=True)
 
     with open(f"{results_folder}/rtl_generation.log", "w") as stdout_file:
         result = subprocess.run(
@@ -386,27 +338,27 @@ def build_rtl(results_folder, keep_build, env_vars):
     return True
 
 
-def run_accuracy(model, dataset, num_processes, output_folder):
+def run_accuracy(models, dataset, num_processes, output_folder):
     check_environment_vars(["DATATYPE", "IC_DIMENSION", "OC_DIMENSION"])
 
-    if len(model) > 1:
-        print(f"Only testing accuracy for the first model: {model[0]}")
-    model = model[0]
+    if len(models) > 1:
+        print(f"Only testing accuracy for the first model: {models[0]}")
+    model = models[0]
 
-    env_vars = network_env(model)
+    env_vars = os.environ.copy()
+    # The AccuracyTester binary, run below without make, reads it.
+    env_vars["NETWORK"] = model
     set_default_env_vars(env_vars)
     build_folder = get_build_folder(env_vars)
+    settings = network_settings(model, REPO_DIR)
 
     # Build AccuracyTester binary
-    subprocess.run(["make", "clean"], env=env_vars)
-
-    with open(f"{output_folder}/build.log", "w") as stdout_file:
-        subprocess.run(
-            ["make", "-j", "AccuracyTester"],
-            env=env_vars,
-            stdout=stdout_file,
-            stderr=subprocess.STDOUT,
-        )
+    subprocess.run(["make", "clean", *settings], env=env_vars, check=True)
+    run_logged(
+        ["make", "-j", "AccuracyTester", *settings],
+        f"{output_folder}/build.log",
+        env_vars,
+    )
 
     # Dump model parameters
     if model == "resnet18":
@@ -436,122 +388,41 @@ def run_accuracy(model, dataset, num_processes, output_folder):
     else:
         raise ValueError("Invalid dataset")
 
-    ic_unroll = int(os.environ["IC_DIMENSION"])
-    oc_unroll = int(os.environ["OC_DIMENSION"])
-    block_size = max(ic_unroll, oc_unroll)
-
-    if env_vars["DATATYPE"] == "E4M3":
-        quantization_args = [
-            "--activation",
-            "fp8_e4m3",
-            "--weight",
-            "fp8_e4m3",
-            "--bf16",
-        ]
-    elif env_vars["DATATYPE"] == "INT8":
-        quantization_args = [
-            "--activation",
-            "int8,qs=per_tensor_symmetric",
-            "--weight",
-            "int8,qs=per_tensor_symmetric",
-            "--bias",
-            "int24",
-            "--bf16",
-            "--calibration_steps",
-            "10",
-        ]
-    elif env_vars["DATATYPE"] == "P8_1":
-        quantization_args = [
-            "--activation",
-            "posit8_1",
-            "--weight",
-            "posit8_1",
-            "--bf16",
-        ]
-    elif env_vars["DATATYPE"] == "CFLOAT":
-        quantization_args = []
-    elif env_vars["DATATYPE"] == "BF16":
-        quantization_args = [
-            "--bf16",
-        ]
-    elif env_vars["DATATYPE"] == "MXINT8":
-        quantization_args = [
-            "--force_scale_power_of_two",
-            "--activation",
-            "int8,qs=microscaling,bs=" + str(block_size),
-            "--weight",
-            "int8,qs=microscaling,bs=" + str(block_size),
-            "--bf16",
-            "--calibration_steps",
-            "10",
-        ]
-    elif env_vars["DATATYPE"] == "MXNF4":
-        quantization_args = [
-            "--activation",
-            f"int6,qs=microscaling,bs={block_size},scale=fp8_e5m3",
-            "--weight",
-            f"int6,qs=microscaling,bs={block_size},scale=fp8_e5m3",
-            "--bf16",
-        ]
-    else:
-        raise ValueError("Invalid datatype")
-
-    if env_vars["DATATYPE"] == "MXNF4":
-        quantization_args += ["--bank_width", str(oc_unroll // 2)]
-    elif env_vars["DATATYPE"] not in ("CFLOAT", "BF16"):
-        quantization_args += ["--bank_width", str(oc_unroll)]
-
-    # Keep in sync with codegen.mk's COMMON_FLAGS.
-    common_flags = [
-        "--layout_policy",
-        "systolic",
-        "--pe_array_size",
-        f"{ic_unroll},{oc_unroll}",
-        "--dump_tensors",
-        "--double_buffered_l2",
-        "--scratchpad_size",
-        env_vars.get("SCRATCHPAD_SIZE", "2097152"),
-        "--num_banks",
-        env_vars.get("NUM_BANKS", "16"),
-        "--input_buffer_size",
-        env_vars["INPUT_BUFFER_SIZE"],
-        "--weight_buffer_size",
-        env_vars["WEIGHT_BUFFER_SIZE"],
-        "--accum_buffer_size",
-        env_vars["ACCUM_BUFFER_SIZE"],
-    ]
-    if env_vars["DOUBLE_BUFFERED_ACCUM_BUFFER"] in ("true", "1"):
-        common_flags.append("--double_buffered_accum_buffer")
-    if env_vars.get("CONV2D_IM2COL") == "1":
-        common_flags.append("--conv2d_im2col")
-
-    subprocess.run(
+    # The compile every other flow runs, codegen.mk's arguments for the
+    # network and its checkpoint, plus the dataset dump.
+    listing = subprocess.run(
         [
-            "mkdir",
-            "-p",
-            f"{env_vars['CODEGEN_DIR']}/networks/{model}/{env_vars['DATATYPE']}",
-        ]
-    )
+            "make",
+            "-s",
+            "--no-print-directory",
+            "print-compile-args",
+            *settings,
+            f"CHECKPOINT={model_path}",
+        ],
+        env=env_vars,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    compile_args = shlex.split(listing.strip().splitlines()[-1])
+    codegen_dir = env_vars.get("CODEGEN_DIR", DEFAULT_CODEGEN_DIR)
+    model_dir = f"{codegen_dir}/networks/{model}/{env_vars['DATATYPE']}"
+    os.makedirs(model_dir, exist_ok=True)
 
-    with open(f"{output_folder}/{model}_{dataset}_compiler.log", "w") as stdout_file:
-        subprocess.run(
-            [
-                "python",
-                "voyager-compiler/test/test_codegen.py",
-                model,
-                "--model_name_or_path",
-                model_path,
-                *quantization_args,
-                *common_flags,
-                "--model_output_dir",
-                "build/codegen/networks/" + model + "/" + env_vars["DATATYPE"],
-                "--dump_dataset",
-                "--dataset_output_dir",
-                output_data_dir,
-            ],
-            stdout=stdout_file,
-            stderr=subprocess.STDOUT,
-        )
+    run_logged(
+        [
+            "python",
+            "voyager-compiler/scripts/compile_model.py",
+            *compile_args,
+            "--model_output_dir",
+            model_dir,
+            "--dump_dataset",
+            "--dataset_output_dir",
+            output_data_dir,
+        ],
+        f"{output_folder}/{model}_{dataset}_compiler.log",
+        env_vars,
+    )
 
     # Run accuracy test
     additional_args = []
@@ -601,21 +472,7 @@ def run_accuracy(model, dataset, num_processes, output_folder):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--models",
-        required=True,
-        help="Model(s) to test for regression (resnet18, mobilebert)",
-    )
-    parser.add_argument(
-        "--uniquify_layers",
-        action="store_true",
-        help="Whether to remove duplicated layers in the model",
-    )
-    parser.add_argument(
-        "--skip_layers",
-        action="store_true",
-        help="Whether to skip layers specified in the skip_rules.json",
-    )
+    add_common_args(parser)
     parser.add_argument(
         "--dataset",
         type=str,
@@ -629,17 +486,6 @@ def main():
         help="Simulation to run (gold_model, systemc, rtl, accuracy)",
     )
     parser.add_argument(
-        "--num_processes",
-        type=int,
-        required=True,
-        help="Number of processes to run in parallel",
-    )
-    parser.add_argument(
-        "--tests",
-        default=None,
-        help="Comma separated list of tests to run (e.g. test1,test2)",
-    )
-    parser.add_argument(
         "--keep_build",
         action="store_true",
         help="Keep the generated rtl and use it to run rtl tests",
@@ -647,39 +493,26 @@ def main():
     parser.add_argument(
         "--scverify_test",
         default=None,
-        help="(Internal use) Name of scverify test to run",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Whether to dump RTL simulation waveform",
+        help=(
+            "The layer whose SystemC test builds the VCS testbench (default: "
+            "the first layer of the first model)."
+        ),
     )
     args = parser.parse_args()
 
-    args.models = [s.strip() for s in args.models.split(",")]
-
-    # Create directory with current time
-    current_time = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    results_folder = "regression_results/" + current_time
-    os.makedirs(results_folder)
-    # create softlink to latest results (delete old if exists)
-    os.system("rm -f regression_results/latest")
-    os.system(f"cd regression_results && ln -sf {current_time} latest")
+    results_folder = make_results_folder()
 
     layers = {}
     layer_counts = {}
     tile_counts = {}
-    skip_rules = []
-
-    if args.skip_layers:
-        with open("ci/skip_rules.json", "r") as f:
-            skip_rules = json.load(f)
+    skip_rules = load_skip_rules(REPO_DIR, args.skip_layers)
 
     rtl_build_future = None
     thread_pool = None
 
     # Start RTL build in background
     if args.sims == "rtl":
+        check_environment_vars(["TECHNOLOGY", "CLOCK_PERIOD"])
         thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
         rtl_build_future = thread_pool.submit(
@@ -699,30 +532,30 @@ def main():
         tile_counts[args.models[0]] = {test: 1 for test in layers[args.models[0]]}
     elif args.sims != "accuracy":
         for network in args.models:
-            env_vars = network_env(network)
-            subprocess.run(["make", "network-proto"], env=env_vars)
-            datatype = os.environ["DATATYPE"]
-            block_size = max(
-                int(os.environ["OC_DIMENSION"]), int(os.environ["IC_DIMENSION"])
-            )
-            skip_layers = get_skip_layers(
-                skip_rules, network, datatype, args.sims, block_size
-            )
-            add_layers(
+            compile_network(network, repo_dir=REPO_DIR, env=os.environ.copy())
+            network_layers(
                 network,
                 layers,
                 layer_counts,
                 tile_counts,
-                args.uniquify_layers,
-                skip_layers,
+                env=os.environ.copy(),
+                sim_type=args.sims,
+                codegen_root=os.environ.get("CODEGEN_DIR", DEFAULT_CODEGEN_DIR),
+                skip_rules=skip_rules,
+                uniquify=args.uniquify_layers,
             )
 
     if args.sims == "systemc" or args.sims == "fast-systemc":
-        success = run_systemc_tests(
+        fast = args.sims == "fast-systemc"
+        success = run_unit_tests(
             layers,
             args.num_processes,
             results_folder,
-            args.sims == "fast-systemc",
+            build_target="TestRunner-fast" if fast else "TestRunner",
+            target="fast-sim" if fast else "sim",
+            sims="gold,accelerator",
+            timeout=4 * 60 * 60,
+            clean=True,
         )
     elif args.sims == "rtl":
         if rtl_build_future:
@@ -745,7 +578,16 @@ def main():
             args.debug
         )
     elif args.sims == "gold_model":
-        success = run_gold_model_tests(layers, args.num_processes, results_folder)
+        success = run_unit_tests(
+            layers,
+            args.num_processes,
+            results_folder,
+            build_target="TestRunner",
+            target="sim",
+            sims="gold,pytorch",
+            timeout=20 * 60,
+            clean=False,
+        )
     elif args.sims == "accuracy":
         success = run_accuracy(
             args.models, args.dataset, args.num_processes, results_folder

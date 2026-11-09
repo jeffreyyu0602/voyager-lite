@@ -20,7 +20,7 @@ template <typename... InputTypes, typename... WeightTypes, typename Input,
 struct MatrixVectorUnit<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
                         Input, Weight, Psum, Output, Scale, port_width, width,
                         bs, vu_width> : public sc_module {
-  static constexpr int LOOP_WIDTH = 16;
+  static constexpr int LOOP_WIDTH = MatrixParams::LOOP_WIDTH;
 
   sc_in<bool> CCS_INIT_S1(clk);
   sc_in<bool> CCS_INIT_S1(rstn);
@@ -311,7 +311,6 @@ struct MatrixVectorUnit<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
     send_inputs_param.ResetRead();
     input_data.ResetRead();
     mac_inputs.ResetWrite();
-    start.Reset();
 #if SUPPORT_MX
     input_scale_data.ResetRead();
     mac_input_scales.ResetWrite();
@@ -321,7 +320,6 @@ struct MatrixVectorUnit<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
 
     while (true) {
       MatrixParams params = send_inputs_param.Pop();
-      start.SyncPush();
 
       loop_t K1 = params.loops[0][params.weight_loop_idx[0]];
       loop_t K0 = params.loops[1][params.weight_loop_idx[1]];
@@ -743,11 +741,15 @@ struct MatrixVectorUnit<std::tuple<InputTypes...>, std::tuple<WeightTypes...>,
     process_input_scale_param.ResetWrite();
     process_weight_scale_param.ResetWrite();
 #endif
+    start.Reset();
 
     wait();
 
     while (true) {
       const MatrixParams params = params_in.Pop();
+      // Start before any fetch: the wrapper grants it once the pass's
+      // counter waits hold.
+      start.SyncPush();
       fetch_input_param.Push(params);
       process_input_param.Push(params);
       fetch_weight_param.Push(params);

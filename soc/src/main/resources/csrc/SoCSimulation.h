@@ -21,15 +21,16 @@
 // in its own memory (host_request.h): a copy or zero fill names its prim by
 // ordinal in the host-request table (HostRequests.h) and carries the
 // run-time values of the scalars the prim references, so the testbench runs
-// the very same run_async_copy / zero_buffer the interpreter does. A
-// request completes by adding to a counter cell the firmware spins on.
+// the very same run_async_copy / zero_buffer the interpreter does. A copy
+// completes by adding 1 to the hardware synchronization counter it names,
+// through the wrapper's DMA completion port; the other kinds by adding 1 to
+// a cell the firmware spins on.
 //
 // The testbench is driven by three DPI events from the Verilog collateral:
-// the doorbell (hardware semaphore 7 changed: read the mailbox), a unit's
-// done pulse, and the same done `done_settle` cycles later, once the unit's
-// last writes have landed. Requests that touch the scratchpad wait for that
-// settle; a commit's retire post completes once every unit's settled done
-// count has reached the count the firmware had issued when it posted.
+// the doorbell (the wrapper's doorbell count changed: read the mailbox), a
+// unit's done pulse, and the same done `done_settle` cycles later, once the
+// unit's last writes have landed. Requests that touch the scratchpad wait
+// for that settle.
 class SoCSimulation : public Simulation {
  public:
   SoCSimulation();
@@ -51,7 +52,6 @@ class SoCSimulation : public Simulation {
   void service();
   void execute(const Request& request);
   void complete(const Request& request);
-  bool retired(const Request& post) const;
   ScalarEnv request_env(const HostOp& host, const Request& request) const;
   std::string describe(const Request& request) const;
 
@@ -64,10 +64,8 @@ class SoCSimulation : public Simulation {
   uint64_t mailbox_ = 0;  // absolute address of host_mailbox
   uint64_t tail_ = 0;     // requests taken off the ring
 
-  std::deque<Request> queue_;   // taken, not yet serviced, in order
-  std::vector<Request> posts_;  // retire posts awaiting their done counts
+  std::deque<Request> queue_;  // taken, not yet serviced, in order
 
-  uint64_t done_count_[HOST_NUM_UNITS] = {0, 0, 0, 0};
   int settling_ = 0;  // done pulses whose settle has not elapsed
 
   bool finished_ = false;

@@ -88,7 +88,7 @@ int sc_main(int argc, char* argv[]) {
     std::cout << "Emitting " << name << std::endl;
     try {
       const auto selection = model.selected_ops({name});
-      const std::string program = emitter.emit_layer(selection);
+      const std::string program = emitter.emit_layer(selection, name);
       const std::string path = base_path + name + ".c";
       {
         std::ofstream out(path, std::ios::out);

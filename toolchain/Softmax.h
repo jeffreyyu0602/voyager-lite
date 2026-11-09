@@ -39,7 +39,7 @@ void map_softmax(const voyager::Operation& operation, const ScalarEnv& env,
 
   const int packing_factor = OC_DIMENSION / VECTOR_UNIT_WIDTH;
 
-  int input_dtype = get_index_from_type_name<VU_INPUT_TYPES>(input.dtype);
+  int input_dtype = hw_dtype_index<VU_INPUT_TYPES>(input.dtype, "read");
   int input_dtype_width = get_type_width<VU_INPUT_TYPES>(input_dtype);
   int input_fetch_width = OC_DIMENSION * input_dtype_width;
 
@@ -254,7 +254,7 @@ void map_softmax(const voyager::Operation& operation, const ScalarEnv& env,
   vector_params->vector_output_offset = get_address(output);
   vector_params->output_mode = 2;
   vector_params->output_dtype =
-      get_index_from_type_name<OUTPUT_DATATYPES>(output.dtype);
+      hw_dtype_index<OUTPUT_DATATYPES>(output.dtype, "write");
 
   for (int i = 0; i < 3; i++) {
     vector_params->output_loops[0][i] = 1;

@@ -5,6 +5,13 @@
 
 SoCSimulation* sim = NULL;
 
+#ifdef HW_DMA
+#include "DMATest.h"
+
+/* The DMA engine's directed test: DMA_TEST set and no network. */
+DMATest* dma_test = NULL;
+#endif
+
 bool running_a_network() {
   /* In full JTAG mode (JTAG_SIM=1) GDB performs the data loading and output
    * checking, so the DPI testbench must stay out of the way. */
@@ -28,6 +35,13 @@ extern "C" void load_memory() {
     sim = new SoCSimulation();
     sim->start();
   }
+#ifdef HW_DMA
+  else if (std::getenv("DMA_TEST") && !std::getenv("JTAG_SIM")) {
+    assert(dma_test == NULL && "load_memory() called twice");
+    dma_test = new DMATest();
+    dma_test->start();
+  }
+#endif
 }
 
 /* Randomized register init can pulse a unit's done_vld, or flip the doorbell
@@ -39,6 +53,9 @@ extern "C" void host_doorbell() {
     if (sim == NULL) return;
     sim->doorbell();
   }
+#ifdef HW_DMA
+  if (dma_test != NULL) dma_test->doorbell();
+#endif
 }
 
 extern "C" void unit_started(int unit) {

@@ -62,6 +62,150 @@ void walk_op(const voyager::Operation& op, const Visitor& visit) {
   }
 }
 
+// Steps of a tile loop per output tile. The loop delinearizes its step over
+// the tile grid, and the dispatches of a split reduction sit in conditionals
+// on its first or last round (`k == 0`, `k == K - 1`); K, that dimension's
+// extent, is the rounds per tile, and the reduction must be the innermost
+// dimension so a tile's rounds are consecutive steps. A loop with no such
+// conditional runs one step per tile.
+int64_t rounds_per_tile(const voyager::Operation& loop_op,
+                        const std::string& layer) {
+  const auto fail = [&](const std::string& why) {
+    throw std::runtime_error("Layer " + layer + ", loop " + loop_op.name() +
+                             ": cannot tell the steps per output tile (" + why +
+                             ").");
+  };
+  if (!loop_op.loop().has_for_loop()) fail("not a counted loop");
+  const voyager::ForLoop& loop = loop_op.loop().for_loop();
+
+  // The step's grid index: each result of a delinearize of the induction
+  // variable, as (basis, dimension).
+  std::map<std::string, std::pair<std::vector<int64_t>, int>> grid_index;
+  // Each scalar comparison: its operand and the literal compared against.
+  std::map<std::string, std::pair<std::string, int64_t>> comparisons;
+  for (const auto& op : loop.body().ops()) {
+    if (!op.has_prim()) continue;
+    const voyager::PrimOp& prim = op.prim();
+    if (prim.target() == "voyager::delinearize_index") {
+      const auto& linear = prim.kwargs().at("linear").scalar();
+      if (!linear.has_node() || linear.node() != loop.iv()) continue;
+      std::vector<int64_t> basis;
+      for (const auto& value : prim.kwargs().at("basis").scalar_list().values()) {
+        if (!value.has_int_value()) fail("a non-literal grid extent");
+        basis.push_back(value.int_value());
+      }
+      for (int d = 0; d < op.outputs_size(); d++) {
+        grid_index[op.outputs(d).name()] = {basis, d};
+      }
+    } else if (strip_namespace(prim.target()) == "eq" &&
+               op.outputs_size() == 1 && has_arg(prim, "input") &&
+               has_arg(prim, "other")) {
+      const auto& input = arg(prim, "input").scalar();
+      const auto& other = arg(prim, "other").scalar();
+      if (input.has_node() && other.has_int_value()) {
+        comparisons[op.outputs(0).name()] = {input.node(), other.int_value()};
+      }
+    }
+  }
+
+  const auto dispatches = [](const voyager::Region& region) {
+    bool found = false;
+    walk_all(region.ops(), [&](const voyager::Operation& op) {
+      if (op.has_async()) found = true;
+    });
+    return found;
+  };
+
+  int reduction_dim = -1;
+  std::vector<int64_t> basis;
+  for (const auto& op : loop.body().ops()) {
+    if (!op.has_cond() || !op.cond().predicate().has_node()) continue;
+    const auto comparison = comparisons.find(op.cond().predicate().node());
+    if (comparison == comparisons.end()) continue;
+    const auto index = grid_index.find(comparison->second.first);
+    if (index == grid_index.end()) continue;
+    const auto& [index_basis, dim] = index->second;
+    const int64_t extent = index_basis[dim];
+    const int64_t literal = comparison->second.second;
+    if (extent <= 1 || (literal != 0 && literal != extent - 1)) continue;
+    if (!dispatches(op.cond().true_region()) &&
+        !dispatches(op.cond().false_region())) {
+      continue;
+    }
+    if (reduction_dim >= 0 && reduction_dim != dim) {
+      fail("its round conditionals test two grid dimensions");
+    }
+    reduction_dim = dim;
+    basis = index_basis;
+  }
+  if (reduction_dim < 0) return 1;
+  for (size_t d = reduction_dim + 1; d < basis.size(); d++) {
+    if (basis[d] != 1) fail("the reduction is not the innermost dimension");
+  }
+  return basis[reduction_dim];
+}
+
+// The epilogue ops a cut that ends mid-tile must not run: each store of the
+// last output tile, which no pass finalized. The stores are the epilogue's
+// copies from the scratchpad to DRAM.
+std::set<const voyager::Operation*> unfinished_tile_stores(
+    const google::protobuf::RepeatedPtrField<voyager::Operation>& ops,
+    int loop_index, int end_index) {
+  std::set<const voyager::Operation*> dropped;
+  for (int i = loop_index + 1; i <= end_index; i++) {
+    const voyager::Operation& op = ops.Get(i);
+    if (!op.has_prim() || op.prim().target() != "voyager::async_copy") {
+      continue;
+    }
+    const voyager::PrimOp& copy = op.prim();
+    const auto& src = arg(copy, "src").tensor_box().box();
+    const auto& dst = arg(copy, "dst").tensor_box().box();
+    if (src.memory().level() == voyager::MEMORY_LEVEL_SCRATCHPAD &&
+        is_dram(dst)) {
+      dropped.insert(&op);
+    }
+  }
+  return dropped;
+}
+
+// Is this a window at fixed offsets into an unbanked buffer? Only such a
+// window bounds where its writer can land before the run.
+bool is_fixed_window(const voyager::TensorBoxRef& ref) {
+  if (ref.offsets_size() == 0 || banks_of(ref.box()) > 1) return false;
+  return std::all_of(ref.offsets().begin(), ref.offsets().end(),
+                     [](const voyager::ScalarValue& offset) {
+                       return offset.has_int_value();
+                     });
+}
+
+// Marks the elements a fixed window covers in a mask over its whole buffer,
+// indexed row-major over the window's source shape.
+void mark_window(const voyager::TensorBoxRef& ref, std::vector<uint8_t>* mask) {
+  const int rank = ref.sizes_size();
+  std::vector<int64_t> pitch(rank, 1);
+  for (int d = rank - 2; d >= 0; d--) {
+    pitch[d] = pitch[d + 1] * ref.box().shape(d + 1);
+  }
+
+  std::vector<int64_t> index(rank, 0);
+  while (true) {
+    int64_t flat = 0;
+    for (int d = 0; d < rank; d++) {
+      flat +=
+          (ref.offsets(d).int_value() + index[d] * ref.strides(d)) * pitch[d];
+    }
+    if (flat < 0 || flat >= static_cast<int64_t>(mask->size())) {
+      throw std::runtime_error("A window of " + ref.box().node() +
+                               " reaches past its buffer");
+    }
+    (*mask)[flat] = 1;
+
+    int d = rank - 1;
+    while (d >= 0 && ++index[d] == ref.sizes(d)) index[d--] = 0;
+    if (d < 0) break;
+  }
+}
+
 }  // namespace
 
 Model::Model(const std::string& model_name) {
@@ -171,44 +315,31 @@ Model::Selection Model::selected_ops(
     return std::pair<int, int>(start->second, end->second);
   };
 
-  // A compiler-emitted drain has constants specialized for the complete loop
-  // (for example, the final output-tile index). If MAX_TILES cuts the loop
-  // short, that drain flushes a scratch tile the run never filled into the
-  // real final-output slot -- uninitialized memory, at the tail of the output.
-  // A sufficiently long partial loop already retires complete tiles through
-  // its in-loop store, so stop the selection at the loop in that case.
-  //
-  // The bound only bites when it is actually below the trip count. A loop that
-  // runs to completion drains legitimately, and stopping short of its drain
-  // would instead leave the final tile -- for a single-output-tile layer, the
-  // only tile -- never stored at all.
   const int64_t max_tiles = getenv_int("MAX_TILES", 0);
 
-  // Bounds that are not compile-time constants cannot be evaluated here -- no
-  // scalar environment exists yet -- so treat those as truncated, which is the
-  // conservative choice and what the selection did before.
-  const auto truncates = [&](const voyager::Operation& op) {
-    if (max_tiles <= 0 || !op.has_loop()) return false;
-
-    // A while loop has no trip count to compare the bound against, and the
-    // interpreter stops it at MAX_TILES whatever its condition says, so it
-    // always truncates.
-    if (!op.loop().has_for_loop()) return true;
-
-    const voyager::ForLoop& loop = op.loop().for_loop();
-    if (!loop.start().has_int_value() || !loop.end().has_int_value() ||
-        !loop.step().has_int_value()) {
-      return true;
+  // Stores the cuts dropped, per counter node, since that counter's last
+  // reset. Every wait on such a counter counts them, so it is lowered by
+  // that many.
+  std::map<std::string, int64_t> unposted;
+  const auto lower = [&](const std::string& counter,
+                         const voyager::ScalarValue& threshold) {
+    const auto found = unposted.find(counter);
+    if (found != unposted.end()) selection.lowered[&threshold] = found->second;
+  };
+  const Visitor lower_waits = [&](const voyager::Operation& op) {
+    if (op.has_async()) {
+      for (const auto& wait : op.async().waits()) {
+        lower(wait.counter().box().node(), wait.threshold());
+      }
     }
-
-    // The interpreter applies the bound only to a positive step, so anything
-    // else runs to completion and drains legitimately.
-    const int64_t step = loop.step().int_value();
-    if (step <= 0) return false;
-
-    const int64_t trips =
-        (loop.end().int_value() - loop.start().int_value() + step - 1) / step;
-    return max_tiles < trips;
+    if (!op.has_prim()) return;
+    const voyager::PrimOp& prim = op.prim();
+    if (prim.target() == "voyager::zeros") {
+      unposted.erase(arg(prim, "input").tensor_box().box().node());
+    } else if (prim.target() == "voyager::async_wait") {
+      lower(arg(prim, "counter").tensor_box().box().node(),
+            arg(prim, "threshold").scalar());
+    }
   };
 
   for (const auto& name : names) {
@@ -249,13 +380,44 @@ Model::Selection Model::selected_ops(
       }
     }
 
+    // A MAX_TILES cut ends a kernel's tile loop early and the kernel's
+    // epilogue, which follows the loop, still runs: it reads the counts the
+    // loop reached, so the whole extent is selected and its loops bounded. A
+    // cut that ends mid-tile leaves the last tile unfinished, so the epilogue
+    // runs without that tile's stores, and the waits that count them are
+    // lowered.
+    std::set<const voyager::Operation*> dropped;
+    for (int i = start_index; i <= end_index && max_tiles > 0; i++) {
+      const voyager::Operation& op = model_.ops(i);
+      if (!op.has_loop() || !op.loop().has_for_loop()) continue;
+      const voyager::ForLoop& loop = op.loop().for_loop();
+      if (!loop.start().has_int_value() || !loop.end().has_int_value() ||
+          !loop.step().has_int_value() || loop.step().int_value() <= 0) {
+        continue;
+      }
+      const int64_t step = loop.step().int_value();
+      const int64_t trips =
+          (loop.end().int_value() - loop.start().int_value() + step - 1) /
+          step;
+      if (max_tiles >= trips) continue;
+      if (max_tiles % rounds_per_tile(op, name) == 0) continue;
+      const auto stores = unfinished_tile_stores(model_.ops(), i, end_index);
+      dropped.insert(stores.begin(), stores.end());
+    }
+
     for (int i = start_index; i <= end_index; i++) {
       const voyager::Operation& op = model_.ops(i);
-      if (!contains(selection.ops, &op)) selection.ops.push_back(&op);
-      if (truncates(op)) {
-        selection.bounded.insert(&op);
-        break;
+      if (dropped.count(&op) != 0) {
+        const voyager::PrimOp& store = op.prim();
+        if (has_tensor(store, "counter")) {
+          unposted[arg(store, "counter").tensor_box().box().node()]++;
+        }
+        continue;
       }
+      if (contains(selection.ops, &op)) continue;
+      walk_op(op, lower_waits);
+      selection.ops.push_back(&op);
+      selection.bounded.insert(&op);
     }
   }
   return selection;
@@ -267,7 +429,7 @@ std::vector<uint64_t> Model::memory_sizes() const {
   uint64_t reference = 0;
 
   for (const auto& [node, box] : boxes_) {
-    if (is_semaphore(*box) || is_constant(*box)) continue;
+    if (is_counter(*box) || is_constant(*box)) continue;
 
     const Tensor tensor = to_tensor(*box);
     const uint64_t end =
@@ -298,9 +460,22 @@ std::vector<const voyager::TensorBox*> Model::resident_inputs() const {
 void Model::live_sets(const std::vector<const voyager::Operation*>& ops,
                       std::vector<const voyager::TensorBox*>* live_in,
                       std::vector<const voyager::TensorBox*>* live_out,
-                      bool include_scratchpad) const {
+                      bool include_scratchpad,
+                      std::map<std::string, Grading>* grading) const {
   std::set<std::string> read;
   std::set<std::string> written;
+  // The fixed windows each buffer is written through, and the buffers some
+  // write reaches whole or at a runtime offset.
+  std::map<std::string, std::vector<const voyager::TensorBoxRef*>> fixed;
+  std::set<std::string> unbounded;
+  std::set<std::string> code_indices;
+  const auto record = [&](const voyager::TensorBoxRef& ref) {
+    if (is_fixed_window(ref)) {
+      fixed[ref.box().node()].push_back(&ref);
+    } else {
+      unbounded.insert(ref.box().node());
+    }
+  };
   // A scratchpad buffer a DMA writes into is a staged input or weight tile,
   // not a compute result, so it is never gradable.
   std::set<std::string> copy_dests;
@@ -315,23 +490,45 @@ void Model::live_sets(const std::vector<const voyager::Operation*>& ops,
   const auto visit = [&](const voyager::Operation& op) {
     for (const auto* prim : get_prim_ops(op)) {
       const bool is_copy = prim->target() == "voyager::async_copy";
+      const bool is_zeros = prim->target() == "voyager::zeros";
       for (const auto& [key, arg] : prim->kwargs()) {
         if (!arg.has_tensor_box()) continue;
-        const std::string& node = arg.tensor_box().box().node();
+        const voyager::TensorBox& operand = arg.tensor_box().box();
+        const std::string& node = operand.node();
         if (!has_box(node)) continue;  // a fusion intermediate
+        if (is_counter(operand)) continue;
         if (is_copy && key == "dst") {
           copy_dests.insert(node);
           written.insert(node);
-        } else if (prim->target() != "voyager::async_wait") {
-          if (!written.count(node)) read.insert(node);
+          record(arg.tensor_box());
+          const auto& src = ::arg(*prim, "src").tensor_box().box();
+          if (code_indices.count(src.node()) != 0) code_indices.insert(node);
+        } else if (is_zeros) {
+          written.insert(node);
+          record(arg.tensor_box());
+        } else if (!written.count(node)) {
+          read.insert(node);
         }
       }
     }
+    // The gold model casts an op's last output through its output_code.
+    const auto prims = get_prim_ops(op);
+    const bool coded = std::any_of(
+        prims.begin(), prims.end(),
+        [](const auto* prim) { return has_arg(*prim, "output_code"); });
+    if (coded && op.outputs_size() > 0 &&
+        op.outputs(op.outputs_size() - 1).has_destination()) {
+      code_indices.insert(
+          op.outputs(op.outputs_size() - 1).destination().box().node());
+    }
+
     for (const auto& output : op.outputs()) {
       if (output.has_destination()) {
         written.insert(output.destination().box().node());
+        record(output.destination());
       } else if (output.has_tensor_box()) {
         written.insert(output.tensor_box().node());
+        unbounded.insert(output.tensor_box().node());
       }
     }
 
@@ -361,8 +558,8 @@ void Model::live_sets(const std::vector<const voyager::Operation*>& ops,
   if (live_out != nullptr) {
     for (const auto& node : written) {
       const voyager::TensorBox& b = box(node);
-      // zeros declares the semaphore it posts as an output; never grade those.
-      if (is_semaphore(b)) continue;
+      // zeros declares the counter it resets as an output; never grade those.
+      if (is_counter(b)) continue;
 
       if (csr_payloads.count(node) != 0) continue;
 
@@ -371,24 +568,25 @@ void Model::live_sets(const std::vector<const voyager::Operation*>& ops,
       } else if (include_scratchpad && partition_of(b) == SRAM_PARTITION &&
                  copy_dests.count(node) == 0) {
         live_out->push_back(&b);
+      } else {
+        continue;
       }
+
+      if (grading == nullptr) continue;
+      Grading& grade = (*grading)[node];
+      grade.code_index = code_indices.count(node) != 0;
+      if (unbounded.count(node) != 0) continue;
+      grade.window.assign(get_size(to_tensor(b)), 0);
+      for (const auto* ref : fixed.at(node)) mark_window(*ref, &grade.window);
     }
   }
 }
 
-std::vector<std::string> Model::semaphore_nodes() const {
-  std::vector<std::string> nodes;
-  for (const auto& [node, box] : boxes_) {
-    if (is_semaphore(*box)) nodes.push_back(node);
-  }
-  return nodes;
-}
-
 void Model::print_summary() const {
-  int dram = 0, sram = 0, semaphores = 0, constants = 0, banked = 0;
+  int dram = 0, sram = 0, counters = 0, constants = 0, banked = 0;
   for (const auto& [node, box] : boxes_) {
-    if (is_semaphore(*box))
-      semaphores++;
+    if (is_counter(*box))
+      counters++;
     else if (partition_of(*box) == SRAM_PARTITION)
       sram++;
     else
@@ -403,6 +601,6 @@ void Model::print_summary() const {
   spdlog::info("> DRAM boxes: {} ({} file-backed constants)\n", dram,
                constants);
   spdlog::info("> Scratchpad boxes: {} ({} banked)\n", sram, banked);
-  spdlog::info("> Semaphores: {}\n", semaphores);
+  spdlog::info("> Counters: {}\n", counters);
   spdlog::info("> DRAM: {} B, SRAM: {} B\n", sizes[0], sizes[1]);
 }

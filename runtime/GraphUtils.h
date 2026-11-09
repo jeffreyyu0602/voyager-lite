@@ -235,9 +235,16 @@ std::string strip_namespace(const std::string& target);
 // Every reference carries the box it names, so these are plain reads of the
 // memory level the compiler assigned.
 
-// A semaphore lives in a register, not in memory: the interpreter keeps a
-// counter.
-bool is_semaphore(const voyager::TensorBox& box);
+// A synchronization counter: a 0-d int64 box at MEMORY_LEVEL_REGISTER. It
+// owns no memory; the backend keeps its value, keyed by counter_id.
+bool is_counter(const voyager::TensorBox& box);
+
+// The hardware counters, numbered 0..NUM_COUNTERS-1.
+constexpr int64_t NUM_COUNTERS = 32;
+
+// The counter a REGISTER-level box names: its memory.address. Throws for a
+// box that is not a counter or whose id is out of range.
+int64_t counter_id(const voyager::TensorBox& box);
 
 // Datapath configuration -- codebooks, quantization maps, scalar dequant
 // scales -- that kernels read straight out of tensor_files by node name
@@ -279,22 +286,6 @@ Tensor resolve(const voyager::PrimOp& op, const std::string& key,
 std::vector<Tensor> resolve_outputs(const voyager::Operation& op,
                                     const ScalarEnv& env);
 
-// The slot a semaphore ref selects (a semaphore has no memory to resolve).
-//
-// A semaphore node may be declared with a shape, which makes it an array of
-// independent counters per bank -- a GEMM epilogue tracks each of its chunks
-// on its own counter. Such a ref indexes [bank, *dims], so flatten the two
-// into one slot id: bank-major, then the dims row-major. A scalar semaphore
-// has one slot per bank and this is just the bank.
-//
-// The whole point of flattening here is that a slot is only ever a key: the
-// backends keep a counter per (node, slot) and never interpret it.
-int64_t resolve_bank(const voyager::TensorBoxRef& ref, const ScalarEnv& env,
-                     const std::string& op_name);
-
-// How many slots a semaphore declaration has: banks times its shape.
-int64_t semaphore_slots(const voyager::TensorBox& box);
-
 // ===========================================================================
 // Data movement
 // ===========================================================================
@@ -303,12 +294,12 @@ int64_t semaphore_slots(const voyager::TensorBox& box);
 // levels. Semantics follow voyager-compiler's async_copy, which is the
 // executable spec.
 //
-// Does not touch the semaphore -- the interpreter posts Operation.semaphore
-// once the op retires, which is where the IR puts it.
+// Does not touch the copy's counter: the interpreter adds 1 to it once the
+// transfer has landed.
 void run_async_copy(const voyager::PrimOp& prim, const ScalarEnv& env,
                     MemoryInterface* memory);
 
-// Zeroes a buffer. (A REGISTER-level voyager::zeros is a semaphore and never
+// Zeroes a buffer. (A REGISTER-level voyager::zeros is a counter and never
 // reaches memory; the interpreter handles those.)
 void zero_buffer(const Tensor& tensor, uint32_t banks, uint64_t bank_stride,
                  MemoryInterface* memory);
